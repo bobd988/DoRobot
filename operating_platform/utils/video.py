@@ -175,7 +175,7 @@ def encode_video_frames(
     fps: int,
     vcodec: Literal["h264_ascend","libopenh264", "libx264"] = "h264_ascend",
     pix_fmt: str = "yuv420p",
-    g: int | None = 10,
+    g: int | None = 1,
     crf: int | None = 10,
     fast_decode: int = 0,
     log_level: Optional[str] = "error",
@@ -185,7 +185,7 @@ def encode_video_frames(
     channel_id: int = 0,
     profile: int = 1,  # 0: baseline, 1: main, 2: high
     rc_mode: int = 0,  # 0: CBR, 1: VBR
-    max_bit_rate: int = 20000,  # 单位 kbps
+    max_bit_rate: int = 10000,  # 单位 kbps
     movement_scene: int = 0,  # 0: static, 1: movement
 ) -> None:
     """More info on ffmpeg arguments tuning on `benchmark/video/README.md`"""
