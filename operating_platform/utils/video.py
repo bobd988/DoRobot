@@ -53,7 +53,7 @@ def get_available_encoders():
             if match:
                 encoders.add(match.group(1))
 
-        print(f"Get ffmpeg encoders: {encoders}")
+        logging.info(f"[VideoEncoder] Available ffmpeg encoders: {encoders}")
 
         return encoders
 
@@ -271,9 +271,9 @@ def encode_video_frames(
         ffmpeg_args.append("-y")
 
     ffmpeg_cmd = ["ffmpeg"] + ffmpeg_args + [str(video_path)]
-    
-    # 打印调试信息
-    print(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
+
+    # Log encoding start
+    logging.info(f"[VideoEncoder] Encoding video: {video_path.name}")
     
     # redirect stdin to subprocess.DEVNULL to prevent reading random keyboard inputs from terminal
     subprocess.run(ffmpeg_cmd, check=True, stdin=subprocess.DEVNULL)
