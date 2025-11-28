@@ -36,6 +36,7 @@ from operating_platform.dataset.visual.visual_dataset import visualize_dataset
 from operating_platform.core.daemon import Daemon
 from operating_platform.core.record import Record, RecordConfig
 from operating_platform.core.replay import DatasetReplayConfig, ReplayConfig, replay
+from operating_platform.utils.camera_display import CameraDisplay
 
 DEFAULT_FPS = 30
 
@@ -250,6 +251,13 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
     logging.info(f"Starting recording session | Resume: {resume} | Episodes: {record.dataset.meta.total_episodes}")
     logging.info("="*30)
 
+    # Create unified camera display (combines all cameras into one window)
+    camera_display = CameraDisplay(
+        window_name="Recording - Cameras",
+        layout="horizontal",
+        show_labels=True
+    )
+
     # 开始记录（带倒计时）- 只做一次
     if record_cmd.get("countdown_seconds", 3) > 0:
         for i in range(record_cmd["countdown_seconds"], 0, -1):
@@ -258,10 +266,13 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
 
     record.start()
 
+    # Voice prompt: ready to start
+    log_say("Ready to start. Press N to save and start next episode.", play_sounds=True)
+
     # 主循环：连续录制多个episodes
     while True:
         logging.info("Recording active. Press:")
-        logging.info("- 'n' to finish current episode and start new one")
+        logging.info("- 'n' to save current episode and start new one")
         logging.info("- 'e' to stop recording and exit")
 
         # Episode录制循环
@@ -269,33 +280,70 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
             daemon.update()
             observation = daemon.get_observation()
 
-            # 显示图像（仅在非无头模式）
+            # 显示图像（仅在非无头模式）- 使用统一相机窗口
             if observation and not is_headless():
-                for key in observation:
-                    if "image" in key:
-                        img = cv2.cvtColor(observation[key], cv2.COLOR_RGB2BGR)
-                        cv2.imshow(f"Camera: {key}", img)
+                key = camera_display.show(observation)
+            else:
+                key = cv2.waitKey(10)
 
             # 处理用户输入
-            key = cv2.waitKey(10)
             if key in [ord('n'), ord('N')]:
-                logging.info("Ending current episode...")
-                break
+                logging.info("Saving current episode and starting new one...")
+
+                # Save current episode (non-blocking)
+                metadata = record.save()
+
+                # Log save status
+                if hasattr(metadata, 'episode_index'):
+                    logging.info(f"Episode {metadata.episode_index} queued (queue pos: {metadata.queue_position})")
+
+                # Check for save errors from previous episodes
+                if hasattr(record, 'async_saver') and record.async_saver:
+                    status = record.async_saver.get_status()
+                    if status["failed_count"] > 0:
+                        logging.warning(f"Warning: {status['failed_count']} episodes failed to save: "
+                                       f"{status['failed_episodes']}")
+
+                logging.info("*"*30)
+                logging.info("Starting new episode...")
+                logging.info("*"*30)
+
+                # Voice prompt: recording new episode
+                next_episode = record.dataset.meta.total_episodes
+                log_say(f"Recording episode {next_episode}.", play_sounds=True)
+
+                break  # Break to restart episode loop
+
             elif key in [ord('e'), ord('E')]:
                 logging.info("Stopping recording and exiting...")
-                record.stop()
 
-                # Async save returns immediately
+                # Voice prompt: end collection
+                log_say("End collection. Please wait for video encoding.", play_sounds=True)
+
+                # IMPORTANT: Stop the DORA daemon FIRST to disconnect hardware gracefully
+                # This prevents hardware disconnection errors during save operations
+                logging.info("Stopping DORA daemon (disconnecting hardware)...")
+                daemon.stop()
+                logging.info("DORA daemon stopped")
+
+                # Save the current episode (async save queues it)
                 metadata = record.save()
                 if hasattr(metadata, 'episode_index'):
                     logging.info(f"Episode {metadata.episode_index} queued for saving")
 
-                # Wait for all pending saves before exiting
+                # Now stop recording thread and wait for image writer to complete
+                # Hardware is already disconnected, so no risk of arm errors
+                record.stop()
+
+                # Properly shutdown async saver (waits for queue AND pending, then stops worker)
                 if hasattr(record, 'async_saver') and record.async_saver:
                     status = record.async_saver.get_status()
-                    if status['pending_count'] > 0:
-                        logging.info(f"Waiting for {status['pending_count']} pending saves...")
-                        record.async_saver.wait_all_complete(timeout=120.0)
+                    pending_total = status['pending_count'] + status['queue_size']
+                    if pending_total > 0:
+                        logging.info(f"Waiting for {pending_total} saves (queue={status['queue_size']}, pending={status['pending_count']})...")
+
+                    # stop() calls wait_all_complete() internally and properly shuts down worker thread
+                    record.async_saver.stop(wait_for_completion=True)
 
                     # Print final status
                     final_status = record.async_saver.get_status()
@@ -304,53 +352,6 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                                f"failed={final_status['stats']['total_failed']}")
 
                 return
-
-        # Save current episode (non-blocking) - DON'T stop the thread
-        metadata = record.save()
-
-        # Log save status
-        if hasattr(metadata, 'episode_index'):
-            logging.info(f"Episode {metadata.episode_index} queued (queue pos: {metadata.queue_position})")
-
-        # Check for save errors from previous episodes
-        if hasattr(record, 'async_saver') and record.async_saver:
-            status = record.async_saver.get_status()
-            if status["failed_count"] > 0:
-                logging.warning(f"⚠ {status['failed_count']} episodes failed to save: "
-                               f"{status['failed_episodes']}")
-
-        # 环境重置（带超时和可视化）
-        logging.info("*"*30)
-        logging.info("Resetting environment - Press 'p' to proceed")
-        logging.info("Note: Robot will automatically reset in 10 seconds if no input")
-
-        reset_start = time.time()
-        reset_timeout = 60
-
-        while time.time() - reset_start < reset_timeout:
-            daemon.update()
-            if observation := daemon.get_observation():
-                for key in observation:
-                    if "image" in key:
-                        img = cv2.cvtColor(observation[key], cv2.COLOR_RGB2BGR)
-                        cv2.imshow(f"Reset View: {key}", img)
-
-            key = cv2.waitKey(10)
-            if key in [ord('p'), ord('P')]:
-                logging.info("Reset confirmed by user")
-                break
-            elif key in [ord('e'), ord('E')]:
-                logging.info("User aborted during reset")
-                record.stop()  # Stop thread before exit
-                # Wait for pending saves before exit
-                if hasattr(record, 'async_saver') and record.async_saver:
-                    record.async_saver.wait_all_complete(timeout=120.0)
-                return
-
-        # 清理窗口
-        if not is_headless():
-            cv2.destroyAllWindows()
-            logging.debug("Closed all OpenCV windows")
 
         # Continue recording next episode (thread is still running, just save() reset the buffer)
 
