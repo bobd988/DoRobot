@@ -36,17 +36,59 @@ SHOW="${SHOW:-1}"
 # DEVICE PORT CONFIGURATION
 # ===========================================================================
 # For stable operation, use persistent paths instead of numeric indices.
-# To find your persistent paths, run:
+#
+# OPTION 1: Create a device config file (RECOMMENDED)
+#   Run: python scripts/detect_usb_ports.py --save
+#   This creates ~/.dorobot_device.conf with your persistent paths
+#
+# OPTION 2: Set environment variables before running
+#   export CAMERA_TOP_PATH="/dev/v4l/by-path/..."
+#   export ARM_LEADER_PORT="/dev/serial/by-path/..."
+#
+# To find your persistent paths manually:
 #   python scripts/detect_usb_ports.py --yaml
 #
+# ===========================================================================
+
+# Device config file locations (checked in order)
+DEVICE_CONFIG_FILES=(
+    "$HOME/.dorobot_device.conf"
+    "/etc/dorobot/device.conf"
+    "$PROJECT_ROOT/.device.conf"
+)
+
+# Source device config if exists
+load_device_config() {
+    for config_file in "${DEVICE_CONFIG_FILES[@]}"; do
+        if [ -f "$config_file" ]; then
+            log_info "Loading device config from: $config_file"
+            source "$config_file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Try to load device config (before setting defaults)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Load device config if available (silent at this point, logged later)
+for config_file in "${DEVICE_CONFIG_FILES[@]}"; do
+    if [ -f "$config_file" ]; then
+        source "$config_file"
+        LOADED_DEVICE_CONFIG="$config_file"
+        break
+    fi
+done
+
+# Default values (only used if not set by config file or environment)
 # Camera paths - use /dev/v4l/by-path/... for stability
-# Example: "/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0"
 CAMERA_TOP_PATH="${CAMERA_TOP_PATH:-0}"
 CAMERA_WRIST_PATH="${CAMERA_WRIST_PATH:-2}"
 CAMERA_WRIST2_PATH="${CAMERA_WRIST2_PATH:-4}"
 
 # Arm ports - use /dev/serial/by-path/... or /dev/serial/by-id/... for stability
-# Example: "/dev/serial/by-path/platform-xhci-hcd.0-usb-0:2:1.0"
 ARM_LEADER_PORT="${ARM_LEADER_PORT:-/dev/ttyACM0}"
 ARM_FOLLOWER_PORT="${ARM_FOLLOWER_PORT:-/dev/ttyACM1}"
 ARM_LEADER2_PORT="${ARM_LEADER2_PORT:-/dev/ttyACM2}"
@@ -148,6 +190,11 @@ setup_npu_env() {
 export_device_ports() {
     log_step "Configuring device ports..."
 
+    # Log if config file was loaded
+    if [ -n "$LOADED_DEVICE_CONFIG" ]; then
+        log_info "Loaded device config from: $LOADED_DEVICE_CONFIG"
+    fi
+
     # Export camera paths
     export CAMERA_TOP_PATH
     export CAMERA_WRIST_PATH
@@ -170,14 +217,14 @@ export_device_ports() {
     # Warn if using default indices (may be unstable)
     if [[ "$CAMERA_TOP_PATH" =~ ^[0-9]+$ ]] || [[ "$CAMERA_WRIST_PATH" =~ ^[0-9]+$ ]]; then
         log_warn "Using numeric camera indices - ports may change on restart!"
-        log_warn "For stability, set CAMERA_TOP_PATH and CAMERA_WRIST_PATH to persistent paths."
-        log_warn "Run: python scripts/detect_usb_ports.py --yaml"
+        log_warn "For stability, create a device config file:"
+        log_warn "  python scripts/detect_usb_ports.py --save"
     fi
 
     if [[ "$ARM_LEADER_PORT" == /dev/ttyACM* ]] || [[ "$ARM_FOLLOWER_PORT" == /dev/ttyACM* ]]; then
         log_warn "Using /dev/ttyACMx paths - ports may change on restart!"
-        log_warn "For stability, set ARM_LEADER_PORT and ARM_FOLLOWER_PORT to persistent paths."
-        log_warn "Run: python scripts/detect_usb_ports.py --yaml"
+        log_warn "For stability, create a device config file:"
+        log_warn "  python scripts/detect_usb_ports.py --save"
     fi
 }
 
