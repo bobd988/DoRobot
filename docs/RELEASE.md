@@ -4,6 +4,46 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.44 (2025-12-05) - Terminal Keyboard Input for Headless Mode
+
+### Summary
+Added terminal-based keyboard input for headless systems without GUI. When `SHOW=0`, users can now press 'n', 'p', 'e' keys in the terminal to control recording.
+
+### Problem
+When running on headless systems (OpenEuler embedded, no GUI), `cv2.waitKey()` cannot capture keyboard input because it requires an OpenCV window. This made it impossible to interact with the recording system when `SHOW=0`.
+
+### Solution
+Added `TerminalKeyboard` class that uses `termios` to read raw keyboard input directly from the terminal (stdin) without requiring a GUI window.
+
+### Changes
+
+**New File: `operating_platform/utils/keyboard_input.py`**
+- `TerminalKeyboard` class for non-blocking terminal keyboard input
+- Uses `termios` and `select` for raw input on Linux/macOS
+- `get_key_headless()` function as drop-in replacement for `cv2.waitKey()`
+
+**File: `operating_platform/core/main.py`**
+- Initialize terminal keyboard when `show_display=False`
+- Use `get_key_headless()` instead of `cv2.waitKey()` in headless mode
+- Proper cleanup of terminal keyboard on exit
+
+### Usage
+```bash
+# Run in headless mode - keyboard input works in terminal
+SHOW=0 bash scripts/run_so101.sh
+
+# Press 'n' to save episode
+# Press 'p' to proceed after reset
+# Press 'e' to exit
+```
+
+### Notes
+- Terminal must be a TTY (not piped input)
+- Works on Linux and macOS
+- Falls back gracefully if termios not available (Windows)
+
+---
+
 ## v0.2.43 (2025-12-05) - Add LeRobot Feetech Support
 
 ### Summary

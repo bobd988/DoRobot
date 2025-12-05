@@ -40,6 +40,7 @@ from operating_platform.core.daemon import Daemon
 from operating_platform.core.record import Record, RecordConfig
 from operating_platform.core.replay import DatasetReplayConfig, ReplayConfig, replay
 from operating_platform.utils.camera_display import CameraDisplay
+from operating_platform.utils.keyboard_input import init_terminal_keyboard, stop_terminal_keyboard, get_key_headless
 from operating_platform.core.cloud_train import CloudTrainer, run_cloud_training
 
 DEFAULT_FPS = 30
@@ -258,6 +259,12 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
     elif is_headless():
         logging.info("Display disabled (headless environment detected)")
 
+    # Initialize terminal keyboard for headless mode
+    use_terminal_keyboard = not show_display
+    if use_terminal_keyboard:
+        init_terminal_keyboard()
+        logging.info("Terminal keyboard input enabled (headless mode)")
+
     # Log cloud offload mode status
     if record_cfg.cloud_offload:
         logging.info("=" * 50)
@@ -318,6 +325,9 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
             # 显示图像（仅在display启用时）- 使用统一相机窗口
             if observation and show_display and camera_display:
                 key = camera_display.show(observation, episode_index=current_episode, status="Recording")
+            elif use_terminal_keyboard:
+                # Headless mode: use terminal keyboard input
+                key = get_key_headless(10)
             else:
                 key = cv2.waitKey(10)
 
@@ -358,6 +368,9 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                     if observation and show_display and camera_display:
                         next_episode = record.dataset.meta.total_episodes
                         key = camera_display.show(observation, episode_index=next_episode, status="Reset - Press P")
+                    elif use_terminal_keyboard:
+                        # Headless mode: use terminal keyboard input
+                        key = get_key_headless(10)
                     else:
                         key = cv2.waitKey(10)
 
@@ -394,6 +407,9 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                 logging.info("Closing camera display...")
                 if camera_display:
                     camera_display.close()
+                if use_terminal_keyboard:
+                    stop_terminal_keyboard()
+                    logging.info("Terminal keyboard stopped")
                 cv2.destroyAllWindows()
                 cv2.waitKey(1)  # Process any pending window events
                 logging.info("Camera display closed")
@@ -491,6 +507,12 @@ def cleanup_resources():
     _cleanup_done = True
 
     logging.info("[Cleanup] Releasing resources...")
+
+    # Stop terminal keyboard if active
+    try:
+        stop_terminal_keyboard()
+    except Exception as e:
+        logging.warning(f"[Cleanup] Error stopping terminal keyboard: {e}")
 
     # Close OpenCV windows
     try:
