@@ -228,6 +228,34 @@ export_device_ports() {
     fi
 }
 
+# Set device permissions to avoid permission denied errors
+set_device_permissions() {
+    log_step "Setting device permissions..."
+
+    # Set camera permissions
+    for cam_path in "$CAMERA_TOP_PATH" "$CAMERA_WRIST_PATH" "$CAMERA_WRIST2_PATH"; do
+        # Skip if it's a numeric index (not a path)
+        if [[ "$cam_path" =~ ^[0-9]+$ ]]; then
+            # Convert index to /dev/videoX
+            cam_path="/dev/video$cam_path"
+        fi
+        if [ -e "$cam_path" ]; then
+            sudo chmod 777 "$cam_path" 2>/dev/null && \
+                log_info "Set permissions for: $cam_path" || \
+                log_warn "Could not set permissions for: $cam_path"
+        fi
+    done
+
+    # Set arm serial port permissions
+    for arm_port in "$ARM_LEADER_PORT" "$ARM_FOLLOWER_PORT" "$ARM_LEADER2_PORT" "$ARM_FOLLOWER2_PORT"; do
+        if [ -e "$arm_port" ]; then
+            sudo chmod 777 "$arm_port" 2>/dev/null && \
+                log_info "Set permissions for: $arm_port" || \
+                log_warn "Could not set permissions for: $arm_port"
+        fi
+    done
+}
+
 # Cleanup function - called on exit
 cleanup() {
     log_step "Cleaning up..."
@@ -469,6 +497,9 @@ main() {
 
     # Step 0.6: Export device port configuration
     export_device_ports
+
+    # Step 0.7: Set device permissions
+    set_device_permissions
 
     # Step 1: Clean up stale sockets
     cleanup_stale_sockets
