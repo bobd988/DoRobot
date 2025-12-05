@@ -32,6 +32,27 @@ CLOUD_OFFLOAD="${CLOUD_OFFLOAD:-0}"
 # Set SHOW=0 to disable camera visualization (for headless systems without GUI)
 SHOW="${SHOW:-1}"
 
+# ===========================================================================
+# DEVICE PORT CONFIGURATION
+# ===========================================================================
+# For stable operation, use persistent paths instead of numeric indices.
+# To find your persistent paths, run:
+#   python scripts/detect_usb_ports.py --yaml
+#
+# Camera paths - use /dev/v4l/by-path/... for stability
+# Example: "/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:1:1.0-video-index0"
+CAMERA_TOP_PATH="${CAMERA_TOP_PATH:-0}"
+CAMERA_WRIST_PATH="${CAMERA_WRIST_PATH:-2}"
+CAMERA_WRIST2_PATH="${CAMERA_WRIST2_PATH:-4}"
+
+# Arm ports - use /dev/serial/by-path/... or /dev/serial/by-id/... for stability
+# Example: "/dev/serial/by-path/platform-xhci-hcd.0-usb-0:2:1.0"
+ARM_LEADER_PORT="${ARM_LEADER_PORT:-/dev/ttyACM0}"
+ARM_FOLLOWER_PORT="${ARM_FOLLOWER_PORT:-/dev/ttyACM1}"
+ARM_LEADER2_PORT="${ARM_LEADER2_PORT:-/dev/ttyACM2}"
+ARM_FOLLOWER2_PORT="${ARM_FOLLOWER2_PORT:-/dev/ttyACM3}"
+# ===========================================================================
+
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -120,6 +141,43 @@ setup_npu_env() {
             log_warn "CANN set_env.sh not found at: $set_env_script"
             log_warn "NPU may not work correctly. Set ASCEND_TOOLKIT_PATH if needed."
         fi
+    fi
+}
+
+# Export device port environment variables for DORA dataflow
+export_device_ports() {
+    log_step "Configuring device ports..."
+
+    # Export camera paths
+    export CAMERA_TOP_PATH
+    export CAMERA_WRIST_PATH
+    export CAMERA_WRIST2_PATH
+
+    # Export arm ports
+    export ARM_LEADER_PORT
+    export ARM_FOLLOWER_PORT
+    export ARM_LEADER2_PORT
+    export ARM_FOLLOWER2_PORT
+
+    # Log configuration
+    log_info "Camera configuration:"
+    log_info "  camera_top:   $CAMERA_TOP_PATH"
+    log_info "  camera_wrist: $CAMERA_WRIST_PATH"
+    log_info "Arm configuration:"
+    log_info "  leader:   $ARM_LEADER_PORT"
+    log_info "  follower: $ARM_FOLLOWER_PORT"
+
+    # Warn if using default indices (may be unstable)
+    if [[ "$CAMERA_TOP_PATH" =~ ^[0-9]+$ ]] || [[ "$CAMERA_WRIST_PATH" =~ ^[0-9]+$ ]]; then
+        log_warn "Using numeric camera indices - ports may change on restart!"
+        log_warn "For stability, set CAMERA_TOP_PATH and CAMERA_WRIST_PATH to persistent paths."
+        log_warn "Run: python scripts/detect_usb_ports.py --yaml"
+    fi
+
+    if [[ "$ARM_LEADER_PORT" == /dev/ttyACM* ]] || [[ "$ARM_FOLLOWER_PORT" == /dev/ttyACM* ]]; then
+        log_warn "Using /dev/ttyACMx paths - ports may change on restart!"
+        log_warn "For stability, set ARM_LEADER_PORT and ARM_FOLLOWER_PORT to persistent paths."
+        log_warn "Run: python scripts/detect_usb_ports.py --yaml"
     fi
 }
 
@@ -300,6 +358,19 @@ print_usage() {
     echo "  DORA_INIT_DELAY     Seconds to wait for DORA to initialize (default: 5)"
     echo "  SOCKET_TIMEOUT      Seconds to wait for ZeroMQ sockets (default: 30)"
     echo ""
+    echo "Device Port Configuration (for stable operation):"
+    echo "  CAMERA_TOP_PATH     Camera top path or index (default: 0)"
+    echo "  CAMERA_WRIST_PATH   Camera wrist path or index (default: 2)"
+    echo "  ARM_LEADER_PORT     Leader arm serial port (default: /dev/ttyACM0)"
+    echo "  ARM_FOLLOWER_PORT   Follower arm serial port (default: /dev/ttyACM1)"
+    echo ""
+    echo "  For stable ports, use persistent paths:"
+    echo "    CAMERA_TOP_PATH=\"/dev/v4l/by-path/platform-xxx-video-index0\""
+    echo "    ARM_LEADER_PORT=\"/dev/serial/by-path/platform-xxx-port0\""
+    echo ""
+    echo "  Find your persistent paths with:"
+    echo "    python scripts/detect_usb_ports.py --yaml"
+    echo ""
     echo "Examples:"
     echo "  $0                              # Default: local encoding + NPU enabled"
     echo "  REPO_ID=my-dataset $0           # Custom dataset name"
@@ -309,6 +380,9 @@ print_usage() {
     echo ""
     echo "  # Headless mode (no camera display, for systems without GUI):"
     echo "  SHOW=0 $0"
+    echo ""
+    echo "  # With persistent device paths (recommended for stability):"
+    echo "  CAMERA_TOP_PATH=\"/dev/v4l/by-path/...\" ARM_LEADER_PORT=\"/dev/serial/by-path/...\" $0"
     echo ""
     echo "  # Headless + cloud mode:"
     echo "  SHOW=0 CLOUD_OFFLOAD=1 $0"
@@ -345,6 +419,9 @@ main() {
 
     # Step 0.5: Setup NPU environment if needed
     setup_npu_env
+
+    # Step 0.6: Export device port configuration
+    export_device_ports
 
     # Step 1: Clean up stale sockets
     cleanup_stale_sockets
