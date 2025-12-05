@@ -382,7 +382,12 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                         # Trigger exit by setting key and breaking
                         if camera_display:
                             camera_display.close()
-                        cv2.destroyAllWindows()
+                        if use_terminal_keyboard:
+                            stop_terminal_keyboard()
+                        try:
+                            cv2.destroyAllWindows()
+                        except Exception:
+                            pass  # Ignore OpenCV errors on headless systems
                         daemon.stop()
                         return
                 else:
@@ -410,8 +415,13 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                 if use_terminal_keyboard:
                     stop_terminal_keyboard()
                     logging.info("Terminal keyboard stopped")
-                cv2.destroyAllWindows()
-                cv2.waitKey(1)  # Process any pending window events
+                # Wrap OpenCV cleanup in try-except for headless systems
+                try:
+                    cv2.destroyAllWindows()
+                    cv2.waitKey(1)  # Process any pending window events
+                except Exception as cv_err:
+                    # OpenCV may fail on headless systems without GUI support - this is OK
+                    logging.debug(f"OpenCV cleanup skipped (headless): {cv_err}")
                 logging.info("Camera display closed")
 
                 # IMPORTANT: Stop the DORA daemon FIRST to disconnect hardware gracefully

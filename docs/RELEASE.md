@@ -4,6 +4,31 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.46 (2025-12-05) - Fix OpenCV Crash on Headless Exit
+
+### Summary
+Fixed crash when pressing 'e' to exit on headless systems, which was preventing video encoding.
+
+### Problem
+On headless systems without GUI support (like OpenEuler embedded), `cv2.destroyAllWindows()` throws an exception:
+```
+OpenCV(4.12.0) error: (-2:Unspecified error) The function is not implemented. Rebuild the library with Windows, GTK+ 2.x or Cocoa support.
+```
+This exception caused the entire exit sequence to abort, skipping video encoding and leaving no `videos/` folder.
+
+### Solution
+Wrap OpenCV cleanup calls in try-except to gracefully handle headless systems. The error is logged at debug level and doesn't interrupt the save/encode workflow.
+
+### Changes
+
+**File: `operating_platform/core/main.py`**
+- Wrap `cv2.destroyAllWindows()` in try-except at exit path
+- Wrap `cv2.destroyAllWindows()` in try-except during reset abort
+- Add terminal keyboard cleanup in abort path
+- Log OpenCV errors at debug level (not error) since they're expected on headless
+
+---
+
 ## v0.2.45 (2025-12-05) - Device Config File for Stable USB Ports
 
 ### Summary
