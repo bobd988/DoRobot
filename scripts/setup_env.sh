@@ -147,9 +147,18 @@ print_usage() {
 
 # Get PyTorch install command based on device type
 get_pytorch_install_cmd() {
+    # Detect architecture
+    ARCH=$(uname -m)
+
     case $DEVICE_TYPE in
         "cpu")
-            echo "pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu"
+            if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+                # ARM64: Use PyPI directly (no special index needed)
+                echo "pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1"
+            else
+                # x86_64: Use CPU index
+                echo "pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu"
+            fi
             ;;
         "cuda11.8")
             echo "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118"
@@ -161,8 +170,12 @@ get_pytorch_install_cmd() {
             echo "pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124"
             ;;
         "npu")
-            # For NPU, install PyTorch 2.5.1 (compatible with torch-npu 2.5.1)
-            echo "pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu"
+            # For NPU (typically aarch64), install PyTorch 2.5.1 from PyPI
+            if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+                echo "pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1"
+            else
+                echo "pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu"
+            fi
             ;;
         *)
             log_error "Unsupported device type: $DEVICE_TYPE"

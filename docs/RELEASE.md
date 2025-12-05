@@ -4,6 +4,29 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.40 (2025-12-04) - Fix PyTorch Install for ARM64/aarch64
+
+### Summary
+Fixed PyTorch installation on ARM64 architecture (Orange Pi, aarch64, OpenEuler).
+
+### Problem
+PyTorch CPU index (`https://download.pytorch.org/whl/cpu`) doesn't have ARM64 builds for version 2.5.1. The script failed with:
+```
+ERROR: Could not find a version that satisfies the requirement torch==2.5.1
+```
+
+### Solution
+Detect architecture and use PyPI directly for ARM64 (which has ARM64 wheels), while keeping the CPU index for x86_64.
+
+### Changes
+
+**Files: `scripts/setup_env.sh`, `scripts/setup_env_base.sh`**
+- Detect architecture with `uname -m`
+- ARM64/aarch64: Install from PyPI directly (no `--index-url`)
+- x86_64: Continue using `--index-url https://download.pytorch.org/whl/cpu`
+
+---
+
 ## v0.2.39 (2025-12-04) - Disable Update Repos During Install
 
 ### Summary
