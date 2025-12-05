@@ -320,9 +320,14 @@ main() {
     log_step "Installing LeRobot with Feetech motor support..."
     pip install 'lerobot[feetech]'
 
-    # Step 8: Install OpenCV (ensure we have the GUI version)
-    log_step "Ensuring OpenCV with GUI support..."
-    pip install opencv-python
+    # Step 8: Install OpenCV with GUI support from conda-forge
+    # IMPORTANT: pip's opencv-python has ffmpeg/PyAV conflicts that cause cv2.imshow to hang
+    # The proven solution from LeRobot community is to use conda-forge's opencv
+    # See: https://github.com/huggingface/lerobot/issues/520
+    log_step "Installing OpenCV from conda-forge (fixes display issues)..."
+    conda install -y -c conda-forge ffmpeg
+    pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python 2>/dev/null || true
+    conda install -y -c conda-forge "opencv>=4.10.0"
 
     # Step 9: Install Rerun visualization tool
     log_step "Installing Rerun SDK..."

@@ -4,6 +4,48 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.48 (2025-12-05) - Fix OpenCV GUI Support with conda-forge
+
+### Summary
+Fixed OpenCV GUI display issues by using conda-forge's OpenCV instead of pip's opencv-python.
+
+### Problem
+On systems with GUI display, running data collection fails with:
+```
+cv2.error: OpenCV(4.12.0) error: (-2:Unspecified error) The function is not implemented.
+Rebuild the library with Windows, GTK+ 2.x or Cocoa support.
+```
+
+### Root Cause
+The pip-installed `opencv-python` package has ffmpeg/PyAV version conflicts that cause `cv2.imshow` to hang or fail. This is a known issue in the LeRobot community (see [huggingface/lerobot#520](https://github.com/huggingface/lerobot/issues/520)).
+
+### Solution
+Use conda-forge's OpenCV package instead of pip's opencv-python. This is the proven solution from the LeRobot community:
+
+```bash
+conda install -y -c conda-forge ffmpeg
+pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python
+conda install -y -c conda-forge "opencv>=4.10.0"
+```
+
+### Changes
+
+**File: `scripts/setup_env.sh`**
+- Step 8: Install ffmpeg and OpenCV from conda-forge instead of pip
+
+**File: `scripts/setup_env_base.sh`**
+- Step 7: Install ffmpeg and OpenCV from conda-forge instead of pip
+
+### Immediate Fix (for existing installations)
+
+```bash
+conda install -y -c conda-forge ffmpeg
+pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python
+conda install -y -c conda-forge "opencv>=4.10.0"
+```
+
+---
+
 ## v0.2.47 (2025-12-05) - Fix PyTorch/torchvision Version Conflicts
 
 ### Summary
