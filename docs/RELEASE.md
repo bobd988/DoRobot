@@ -4,6 +4,40 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.42 (2025-12-05) - Always Start Fresh Dataset
+
+### Summary
+Changed data collection to always clear existing dataset directory on startup, preventing errors from corrupted/incomplete datasets from previous interrupted sessions.
+
+### Problem
+When the data collection script crashes or is interrupted, it may leave incomplete dataset files (e.g., missing `meta/tasks.jsonl`). On restart, the script would try to resume from this corrupted state, causing errors like:
+```
+FileNotFoundError: No such file or directory: '.../meta/tasks.jsonl'
+```
+
+### Solution
+Always remove existing dataset directory and start fresh on each run. This ensures a clean slate without corrupted metadata.
+
+### Changes
+
+**File: `operating_platform/core/main.py`**
+- Removed resume logic that checked for existing data
+- Always clear existing dataset directory if non-empty
+- Start fresh recording session every time
+
+### Impact
+- No more errors from corrupted/incomplete datasets
+- Each `run_so101.sh` invocation starts with a clean dataset
+- Previous data in the same repo_id will be deleted (use different REPO_ID to preserve old data)
+
+### Usage Note
+If you want to preserve data from a previous session, use a different `REPO_ID`:
+```bash
+REPO_ID=my-dataset-v2 bash scripts/run_so101.sh
+```
+
+---
+
 ## v0.2.41 (2025-12-05) - Add SHOW Parameter and Change CLOUD_OFFLOAD Default
 
 ### Summary
