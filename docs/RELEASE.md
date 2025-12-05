@@ -4,6 +4,19 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.43 (2025-12-05) - Add LeRobot Feetech Support
+
+### Summary
+Added `lerobot[feetech]` installation to setup scripts for Feetech motor support.
+
+### Changes
+
+**Files: `scripts/setup_env.sh`, `scripts/setup_env_base.sh`**
+- Added `pip install 'lerobot[feetech]'` step after SO101 arm component installation
+- Re-numbered subsequent installation steps
+
+---
+
 ## v0.2.42 (2025-12-05) - Always Start Fresh Dataset
 
 ### Summary

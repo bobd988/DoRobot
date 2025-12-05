@@ -270,15 +270,19 @@ main() {
     cd "$PROJECT_ROOT/operating_platform/robot/components/arm_normal_so101_v1"
     pip install -e .
 
-    # Step 6: Install OpenCV (ensure we have the GUI version)
+    # Step 6: Install LeRobot with Feetech motor support
+    log_step "Installing LeRobot with Feetech motor support..."
+    pip install 'lerobot[feetech]'
+
+    # Step 7: Install OpenCV (ensure we have the GUI version)
     log_step "Ensuring OpenCV with GUI support..."
     pip install opencv-python
 
-    # Step 7: Install Rerun visualization tool
+    # Step 8: Install Rerun visualization tool
     log_step "Installing Rerun SDK..."
     pip install rerun-sdk
 
-    # Step 8: Install system dependencies (Linux only)
+    # Step 9: Install system dependencies (Linux only)
     if [ "$(uname)" == "Linux" ]; then
         log_step "Installing Linux system dependencies..."
 
@@ -360,7 +364,7 @@ main() {
         fi
     fi
 
-    # Step 9: Verify installation
+    # Step 10: Verify installation
     log_step "Verifying installation..."
 
     echo ""
