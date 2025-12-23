@@ -12,6 +12,7 @@ from dora import Node
 from pathlib import Path
 
 from motors.feetech import FeetechMotorsBus, OperatingMode
+from motors.zhonglin import ZhonglinMotorsBus
 from motors import Motor, MotorCalibration, MotorNormMode
 
 
@@ -106,26 +107,45 @@ def main():
 
     norm_mode_body = MotorNormMode.DEGREES if use_degrees else MotorNormMode.RANGE_M100_100
 
-    arm_bus = FeetechMotorsBus(
-        port=PORT,
-        motors={
-            "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-            "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-            "elbow_flex": Motor(3, "sts3215", norm_mode_body),
-            "wrist_flex": Motor(4, "sts3215", norm_mode_body),
-            "wrist_roll": Motor(5, "sts3215", norm_mode_body),
-            "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
-        },
-        calibration=arm_calibration,
-    )
+    # Choose motor bus based on ARM_ROLE
+    # Leader arm uses Zhonglin ASCII protocol (ZP10D controller)
+    # Follower arm uses Feetech binary protocol
+    if ARM_ROLE == "leader":
+        arm_bus = ZhonglinMotorsBus(
+            port=PORT,
+            motors={
+                "shoulder_pan": Motor(1, "zhonglin", norm_mode_body),
+                "shoulder_lift": Motor(2, "zhonglin", norm_mode_body),
+                "elbow_flex": Motor(3, "zhonglin", norm_mode_body),
+                "wrist_flex": Motor(4, "zhonglin", norm_mode_body),
+                "wrist_roll": Motor(5, "zhonglin", norm_mode_body),
+                "gripper": Motor(6, "zhonglin", MotorNormMode.RANGE_0_100),
+            },
+            calibration=arm_calibration,
+            baudrate=115200,
+        )
+    else:
+        arm_bus = FeetechMotorsBus(
+            port=PORT,
+            motors={
+                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
+                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
+                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
+                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
+                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
+                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+            },
+            calibration=arm_calibration,
+        )
 
     arm_bus.connect()
     _arm_bus = arm_bus  # Store globally for cleanup
 
     if ARM_ROLE == "follower":
         configure_follower(arm_bus)
-    elif ARM_ROLE == "leader":
+    elif ARM_ROLE == "leader" and isinstance(arm_bus, FeetechMotorsBus):
         configure_leader(arm_bus)
+    # Zhonglin leader arms don't need configuration
 
     ctrl_frame = 0
 

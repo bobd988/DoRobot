@@ -75,20 +75,15 @@ nodes:
       CALIBRATION_DIR: ../../components/arm_normal_so101_v1/.calibration/
 
   - id: arm_so101_follower
-    path: ../../components/arm_normal_so101_v1/main.py
+    path: ../../components/arm_normal_piper_v2/main.py
     inputs:
-      get_joint: dora/timer/millis/33
+      tick: dora/timer/millis/33
       action_joint: arm_so101_leader/joint
       action_joint_ctrl: so101_zeromq/action_joint
     outputs:
-      - joint
+      - slave_jointstate
     env:
-      GET_DEVICE_FROM: PORT
-      # Set ARM_FOLLOWER_PORT env var for persistent path, or uses default
-      PORT: $ARM_FOLLOWER_PORT
-      ARM_NAME: SO101-follower
-      ARM_ROLE: follower
-      CALIBRATION_DIR: ../../components/arm_normal_so101_v1/.calibration/
+      CAN_BUS: $ARM_FOLLOWER_PORT
 
   # - id: arm_so101_leader2
   #   path: ../../components/arm_normal_so101_v1/main.py
