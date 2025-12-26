@@ -125,14 +125,16 @@ def main():
     # Leader arm uses Zhonglin ASCII protocol (ZP10D controller)
     # Follower arm uses Feetech binary protocol
     if ARM_ROLE == "leader":
+        # Leader arm joint naming matches follower arm: joint_0 through joint_5 + gripper
         arm_bus = ZhonglinMotorsBus(
             port=PORT,
             motors={
-                "shoulder_pan": Motor(1, "zhonglin", norm_mode_body),
-                "shoulder_lift": Motor(2, "zhonglin", norm_mode_body),
-                "elbow_flex": Motor(3, "zhonglin", norm_mode_body),
-                "wrist_flex": Motor(4, "zhonglin", norm_mode_body),
-                "wrist_roll": Motor(5, "zhonglin", norm_mode_body),
+                "joint_0": Motor(0, "zhonglin", norm_mode_body),
+                "joint_1": Motor(1, "zhonglin", norm_mode_body),
+                "joint_2": Motor(2, "zhonglin", norm_mode_body),
+                "joint_3": Motor(3, "zhonglin", norm_mode_body),
+                "joint_4": Motor(4, "zhonglin", norm_mode_body),
+                "joint_5": Motor(5, "zhonglin", norm_mode_body),
                 "gripper": Motor(6, "zhonglin", MotorNormMode.RANGE_0_100),
             },
             baudrate=115200,

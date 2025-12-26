@@ -112,14 +112,16 @@ def main():
     # Follower arm uses Feetech binary protocol
     if ARM_ROLE == "leader":
         # Leader arm outputs radians for Piper follower arm compatibility
+        # Joint naming matches follower arm: joint_0 through joint_5 + gripper
         arm_bus = ZhonglinMotorsBus(
             port=PORT,
             motors={
-                "shoulder_pan": Motor(1, "zhonglin", MotorNormMode.RADIANS),
-                "shoulder_lift": Motor(2, "zhonglin", MotorNormMode.RADIANS),
-                "elbow_flex": Motor(3, "zhonglin", MotorNormMode.RADIANS),
-                "wrist_flex": Motor(4, "zhonglin", MotorNormMode.RADIANS),
-                "wrist_roll": Motor(5, "zhonglin", MotorNormMode.RADIANS),
+                "joint_0": Motor(0, "zhonglin", MotorNormMode.RADIANS),
+                "joint_1": Motor(1, "zhonglin", MotorNormMode.RADIANS),
+                "joint_2": Motor(2, "zhonglin", MotorNormMode.RADIANS),
+                "joint_3": Motor(3, "zhonglin", MotorNormMode.RADIANS),
+                "joint_4": Motor(4, "zhonglin", MotorNormMode.RADIANS),
+                "joint_5": Motor(5, "zhonglin", MotorNormMode.RADIANS),
                 "gripper": Motor(6, "zhonglin", MotorNormMode.RADIANS),
             },
             calibration=arm_calibration,
@@ -173,23 +175,13 @@ def main():
                 arm_bus.sync_write("Goal_Position", goal_pos)
 
             elif event["id"] == "get_joint":
-                joint_value = []
                 present_pos = arm_bus.sync_read("Present_Position")
-                # SO101 has 5 joints + 1 gripper, but Piper expects 6 joints + 1 gripper
-                # Send 7 values: [joint1-5, 0 (placeholder for joint6), gripper]
-                pos_list = [val for _motor, val in present_pos.items()]
+                # SO101 now has 7 motors: joint_6 (ID 0) + 5 joints (ID 1-5) + gripper (ID 6)
+                joint_value = [val for _motor, val in present_pos.items()]
 
                 # Debug: print what we're sending (only print occasionally)
                 if ctrl_frame % 100 == 0:
-                    print(f"[{ARM_NAME}] 发送关节数据: 长度={len(pos_list)}, 值={[f'{v:.3f}' for v in pos_list]}")
-
-                if len(pos_list) == 6:
-                    # Insert 0 at position 5 (for missing joint_6), keep gripper at position 6
-                    joint_value = pos_list[:5] + [0.0] + [pos_list[5]]
-                    if ctrl_frame % 100 == 0:
-                        print(f"[{ARM_NAME}] 转换后: 长度={len(joint_value)}, 值={[f'{v:.3f}' for v in joint_value]}")
-                else:
-                    joint_value = pos_list
+                    print(f"[{ARM_NAME}] 发送关节数据: 长度={len(joint_value)}, 值={[f'{v:.3f}' for v in joint_value]}")
 
                 node.send_output("joint", pa.array(joint_value, type=pa.float32()))
 

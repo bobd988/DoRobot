@@ -4,6 +4,157 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.134 (2025-12-26) - Fix SO101 Leader Arm Joint Mapping and Add Diagnostic Tools
+
+### Summary
+Fixed critical joint mapping issue between SO101 leader arm and Piper follower arm. Changed from semantic joint names to indexed naming (joint_0 through joint_5) to ensure correct joint correspondence during teleoperation. Added comprehensive diagnostic scripts for motor detection and calibration synchronization.
+
+### Issues Fixed
+
+1. **Joint mapping mismatch causing incorrect teleoperation**
+   - Leader arm used semantic names (shoulder_pan, shoulder_lift, etc.) that didn't match follower arm's indexed joints
+   - Joint correspondence was incorrect: leader's shoulder_pan controlled follower's joint_1 instead of joint_0
+   - Teleoperation succeeded but joints moved incorrectly
+   - Fix: Renamed all leader arm joints to match follower arm indexing (joint_0 through joint_5)
+
+2. **Missing joint_0 (ID 0) motor in configuration**
+   - Leader arm has 7 motors (ID 0-6) but only 6 were configured (ID 1-6)
+   - Motor ID 0 was not included in calibration or motor definitions
+   - Fix: Added joint_0 with Motor ID 0 to all configurations
+
+3. **Lack of diagnostic tools for motor detection**
+   - No easy way to scan and detect all motors on the serial bus
+   - Difficult to verify motor IDs and positions
+   - Fix: Created multiple diagnostic scripts for comprehensive motor scanning
+
+### Changes
+
+**operating_platform/robot/components/arm_normal_so101_v1/.calibration/SO101-leader.json:**
+- Renamed all joints from semantic names to indexed names:
+  - Added `joint_0` (ID 0): homing_offset=-3, range=[1220, 1426]
+  - `shoulder_pan` → `joint_1` (ID 1): homing_offset=-35→5, range=[1026, 2388]
+  - `shoulder_lift` → `joint_2` (ID 2): homing_offset=951→950
+  - `elbow_flex` → `joint_3` (ID 3): homing_offset=406→549, drive_mode=0→1
+  - `wrist_flex` → `joint_4` (ID 4): homing_offset=803→788, drive_mode=1→0
+  - `wrist_roll` → `joint_5` (ID 5): homing_offset=729→704
+  - `gripper` (ID 6): homing_offset=438→318, range=[1356, 1870]
+
+**operating_platform/robot/components/arm_normal_so101_v1/calibrate.py:**
+- Updated motor definitions to use indexed joint names (joint_0 through joint_5)
+- Added joint_0 with Motor ID 0
+- Added comment explaining joint naming matches follower arm
+
+**operating_platform/robot/components/arm_normal_so101_v1/main.py:**
+- Updated motor definitions to use indexed joint names (joint_0 through joint_5)
+- Added joint_0 with Motor ID 0
+- Removed placeholder joint insertion logic (no longer needed with 7 motors)
+- Simplified joint data transmission: directly send all 7 joint values
+- Updated debug output to reflect new joint structure
+
+### New Diagnostic Scripts
+
+**scripts/detailed_scan.py:**
+- Scans motor IDs 0-20 with detailed retry logic
+- Shows PWM values and calculated angles for each detected motor
+- Useful for comprehensive motor detection across extended ID range
+
+**scripts/detect_leader_joints.py:**
+- Reads calibration file and verifies joint configuration
+- Connects to leader arm and reads actual joint positions
+- Displays joint count and current positions in radians and degrees
+- Validates that configured joints match physical motors
+
+**scripts/scan_all_motors.py:**
+- Quick scan of motor IDs 1-15 on a single serial port
+- Shows detected motor IDs, PWM values, and angles
+- Useful for rapid motor detection during setup
+
+**scripts/scan_all_ports.py:**
+- Scans multiple serial ports (/dev/ttyUSB0, /dev/ttyACM0)
+- Detects motors on each port and provides summary
+- Useful for identifying which port has which motors
+
+**scripts/show_leader_position.py:**
+- Displays current leader arm position in real-time
+- Compares leader position with follower target position
+- Shows position differences and validates if within threshold (40°)
+- Helps with manual alignment before teleoperation
+
+**scripts/sync_leader_calibration.py:**
+- Automatically synchronizes leader arm calibration to match follower arm
+- Reads current PWM values and calculates new homing_offset values
+- Handles negative angles using drive_mode inversion
+- Saves updated calibration to SO101-leader.json
+- Eliminates manual calibration alignment process
+
+### Joint Mapping Architecture
+
+**Before (Incorrect):**
+```
+Leader Arm (Semantic Names)    Follower Arm (Indexed)
+shoulder_pan (ID 1)       →    joint_1 (should be joint_0)
+shoulder_lift (ID 2)      →    joint_2 (should be joint_1)
+elbow_flex (ID 3)         →    joint_3 (should be joint_2)
+wrist_flex (ID 4)         →    joint_4 (should be joint_3)
+wrist_roll (ID 5)         →    joint_5 (should be joint_4)
+[missing]                 →    joint_6 (placeholder 0.0)
+gripper (ID 6)            →    gripper
+```
+
+**After (Correct):**
+```
+Leader Arm (Indexed)      Follower Arm (Indexed)
+joint_0 (ID 0)            →    joint_0
+joint_1 (ID 1)            →    joint_1
+joint_2 (ID 2)            →    joint_2
+joint_3 (ID 3)            →    joint_3
+joint_4 (ID 4)            →    joint_4
+joint_5 (ID 5)            →    joint_5
+gripper (ID 6)            →    gripper
+```
+
+### Calibration Workflow
+
+**Using Automatic Synchronization:**
+1. Physically align leader arm to match follower arm initial position
+2. Run: `ARM_LEADER_PORT=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 python scripts/sync_leader_calibration.py`
+3. Script automatically calculates and saves new calibration parameters
+4. Verify with: `python scripts/show_leader_position.py`
+
+**Manual Verification:**
+1. Check motor detection: `python scripts/scan_all_motors.py`
+2. Verify joint count: `python scripts/detect_leader_joints.py`
+3. Check position alignment: `python scripts/show_leader_position.py`
+
+### Technical Notes
+
+**Why Indexed Joint Names:**
+- Follower arm (Piper) uses indexed joint names (joint_0 through joint_5)
+- Leader arm must use matching names for correct joint correspondence
+- Semantic names (shoulder_pan, etc.) caused mapping confusion
+- Indexed names ensure 1:1 joint mapping during teleoperation
+
+**Motor ID 0 Discovery:**
+- SO101 leader arm has 7 motors with IDs 0-6
+- Previous configuration only included IDs 1-6
+- Motor ID 0 was physically present but not configured
+- Adding joint_0 enables full 7-motor control
+
+**Drive Mode Handling:**
+- drive_mode=0: Normal direction
+- drive_mode=1: Inverted direction (for negative angles)
+- sync_leader_calibration.py automatically sets drive_mode based on target angle sign
+
+### Related Files
+
+- **Calibration file:** `operating_platform/robot/components/arm_normal_so101_v1/.calibration/SO101-leader.json`
+- **Leader arm main:** `operating_platform/robot/components/arm_normal_so101_v1/main.py`
+- **Leader arm calibration:** `operating_platform/robot/components/arm_normal_so101_v1/calibrate.py`
+- **Diagnostic tools:** `scripts/detailed_scan.py`, `scripts/detect_leader_joints.py`, `scripts/scan_all_motors.py`, `scripts/scan_all_ports.py`
+- **Calibration tools:** `scripts/show_leader_position.py`, `scripts/sync_leader_calibration.py`
+
+---
+
 ## v0.2.133 (2025-12-25) - Improve Leader Arm Calibration Reliability and Serial Communication
 
 ### Summary
