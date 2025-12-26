@@ -175,7 +175,21 @@ def main():
             elif event["id"] == "get_joint":
                 joint_value = []
                 present_pos = arm_bus.sync_read("Present_Position")
-                joint_value = [val for _motor, val in present_pos.items()]
+                # SO101 has 5 joints + 1 gripper, but Piper expects 6 joints + 1 gripper
+                # Send 7 values: [joint1-5, 0 (placeholder for joint6), gripper]
+                pos_list = [val for _motor, val in present_pos.items()]
+
+                # Debug: print what we're sending (only print occasionally)
+                if ctrl_frame % 100 == 0:
+                    print(f"[{ARM_NAME}] 发送关节数据: 长度={len(pos_list)}, 值={[f'{v:.3f}' for v in pos_list]}")
+
+                if len(pos_list) == 6:
+                    # Insert 0 at position 5 (for missing joint_6), keep gripper at position 6
+                    joint_value = pos_list[:5] + [0.0] + [pos_list[5]]
+                    if ctrl_frame % 100 == 0:
+                        print(f"[{ARM_NAME}] 转换后: 长度={len(joint_value)}, 值={[f'{v:.3f}' for v in joint_value]}")
+                else:
+                    joint_value = pos_list
 
                 node.send_output("joint", pa.array(joint_value, type=pa.float32()))
 

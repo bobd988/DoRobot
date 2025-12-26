@@ -57,9 +57,9 @@ def main():
 
     # SAFETY: Move to safe home position before starting teleoperation
     # This prevents sudden large movements that could blow the fuse
-    # Position obtained from actual arm state: 2025-12-25 (current actual position)
+    # Position obtained from actual arm state: 2025-12-26 (current actual position)
     print("[Piper] 移动到安全初始位置...")
-    safe_home_position = [7805, 0, 0, -14825, 20234, 33505]
+    safe_home_position = [5393, -1105, 3663, -2910, 19695, 23877]
     piper.JointCtrl(
         safe_home_position[0],
         safe_home_position[1],
@@ -75,8 +75,8 @@ def main():
     first_command_received = False  # Track if we've received first command from leader
 
     # Safety monitoring configuration
-    POSITION_DIFF_WARNING = 15000  # 15 degrees - print warning
-    POSITION_DIFF_EMERGENCY = 20000  # 20 degrees - emergency stop
+    POSITION_DIFF_WARNING = 30000  # 30 degrees - print warning
+    POSITION_DIFF_EMERGENCY = 40000  # 40 degrees - emergency stop
     monitor_interval = 0.5  # Print monitoring info every 0.5 seconds
     last_monitor_time = time.time()
     emergency_stop = False
@@ -241,6 +241,7 @@ def main():
                 joint_value += [gripper.gripper_state.grippers_angle / 1000 / 1000]
 
                 node.send_output("slave_jointstate", pa.array(joint_value, type=pa.float32()))
+                node.send_output("joint", pa.array(joint_value, type=pa.float32()))  # For SO101 compatibility
 
                 position = piper.GetArmEndPoseMsgs()
                 position_value = []

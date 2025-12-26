@@ -526,10 +526,16 @@ class SO101Manipulator:
                 if name in match_name:
                     now = time.perf_counter()
 
-                    byte_array = np.zeros(6, dtype=np.float32)
+                    # Support both 6-value (old format) and 7-value (new format with separate gripper)
                     pose_read = recv_joint[match_name]
-
-                    byte_array[:6] = pose_read[:]
+                    if len(pose_read) >= 7:
+                        # New format: 6 joints + 1 gripper
+                        byte_array = np.zeros(7, dtype=np.float32)
+                        byte_array[:7] = pose_read[:7]
+                    else:
+                        # Old format: 5 joints + 1 gripper (treat as 6 values)
+                        byte_array = np.zeros(6, dtype=np.float32)
+                        byte_array[:6] = pose_read[:6]
                     byte_array = np.round(byte_array, 3)
                     
                     follower_joint[name] = byte_array
@@ -542,10 +548,16 @@ class SO101Manipulator:
                 if name in match_name:
                     now = time.perf_counter()
 
-                    byte_array = np.zeros(6, dtype=np.float32)
+                    # Support both 6-value (old format) and 7-value (new format with separate gripper)
                     pose_read = recv_joint[match_name]
-
-                    byte_array[:6] = pose_read[:]
+                    if len(pose_read) >= 7:
+                        # New format: 6 joints + 1 gripper
+                        byte_array = np.zeros(7, dtype=np.float32)
+                        byte_array[:7] = pose_read[:7]
+                    else:
+                        # Old format: 5 joints + 1 gripper (treat as 6 values)
+                        byte_array = np.zeros(6, dtype=np.float32)
+                        byte_array[:6] = pose_read[:6]
                     byte_array = np.round(byte_array, 3)
                     
                     leader_joint[name] = byte_array

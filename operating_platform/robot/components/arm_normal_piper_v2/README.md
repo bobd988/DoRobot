@@ -44,7 +44,7 @@ sudo ip link set can_right up
 # List available CAN interfaces
 ip link show type can
 
-# Check CAN statistics
+# Check CAN statisticsip link show can_left
 ip -details -statistics link show can_left
 ```
 
@@ -54,7 +54,7 @@ ip -details -statistics link show can_left
 |----------|-------------|---------|
 | `CAN_BUS` | CAN interface name | `can_left`, `can_right`, `can0` |
 
-## DORA Node Interface
+## DORA Node Interfaceip link show can_left
 
 ### Inputs
 
