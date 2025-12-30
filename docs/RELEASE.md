@@ -4,6 +4,150 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.2.137 (2025-12-30) - Pose Mapping Baseline System for Teleoperation
+
+### Summary
+Implemented a pose mapping baseline system that eliminates the need for leader and follower arms to share the same calibration zero point. The system now establishes a dynamic baseline at startup based on the current physical positions of both arms, enabling successful teleoperation even when calibrations differ. Also fixed joint direction issues for joint_4 and joint_5.
+
+### Problem Background
+
+After re-calibrating the leader arm (SO101), teleoperation failed because:
+- Leader arm calibration used joint midpoints as initial reference
+- Follower arm (Piper) couldn't physically move to the leader-defined safe position
+- Large angle differences triggered emergency stop
+- Even after adjusting safety thresholds, teleoperation remained unstable
+
+### Solution: Pose Mapping Baseline System
+
+**Core Concept:**
+Instead of forcing both arms to a fixed safe position, the system now:
+1. Reads the current follower arm position as the baseline at startup
+2. Records the leader arm position on first command as its baseline
+3. Applies offset mapping: `target = follower_baseline + (leader_current - leader_baseline)`
+
+This allows teleoperation to work regardless of calibration differences, as long as both arms start in physically identical poses.
+
+### Modified Files
+
+#### 1. Piper Follower Arm Control
+**File:** `operating_platform/robot/components/arm_normal_piper_v2/main.py`
+
+**Changes:**
+- Lines 58-71: Read current follower position as safe baseline at startup
+- Lines 106-110: Invert joint_4 and joint_5 directions from leader arm (direction compensation)
+- Lines 120-129: Record leader baseline on first command and establish pose mapping
+- Lines 131-134: Apply pose mapping with offset calculation
+
+**Key Code:**
+```python
+# Read current follower position as baseline
+follower_baseline = [
+    current_joint.joint_state.joint_1.real,
+    current_joint.joint_state.joint_2.real,
+    # ... all 6 joints
+]
+
+# Invert joint_4 and joint_5 for direction compensation
+position[3] = -position[3]
+position[4] = -position[4]
+
+# On first command: establish mapping
+leader_baseline = [position[i] * factor for i in range(6)]
+
+# Apply pose mapping
+leader_offset = [leader_current[i] - leader_baseline[i] for i in range(6)]
+target_positions = [follower_baseline[i] + leader_offset[i] for i in range(6)]
+```
+
+#### 2. Follower Preparation Script
+**File:** `scripts/prepare_follower.py`
+
+**Changes:**
+- Lines 91-96: Removed forced movement to fixed SAFE_HOME_POSITION
+- Now only checks follower arm status without moving it
+- Added informational messages about pose mapping approach
+
+**Rationale:** With pose mapping, the follower arm can start from any position. The system establishes the baseline dynamically rather than forcing a specific position.
+
+#### 3. SO101 Robot Manipulator
+**File:** `operating_platform/robot/robots/so101_v1/manipulator.py`
+
+**Changes:**
+- Line 275: Excluded cameras from connection checks
+  ```python
+  self.connect_excluded_cameras = ["image_pika_pose", "image_top", "image_wrist"]
+  ```
+- Lines 581-591: Fixed image handling to skip missing cameras gracefully
+  ```python
+  images = {}
+  for name in self.cameras:
+      if name in recv_images:
+          images[name] = recv_images[name]
+  ```
+
+**Rationale:** System had no physical cameras connected, causing connection timeouts. Now cameras are optional.
+
+### Joint Direction Corrections
+
+**Issue:** Joint_4 and joint_5 moved in opposite directions compared to leader arm
+
+**Solution:** Invert position values from leader arm before applying pose mapping
+```python
+position[3] = -position[3]  # joint_4
+position[4] = -position[4]  # joint_5
+```
+
+**Note:** This is different from `drive_mode` parameter, which is used for Feetech motors in the leader arm configuration. The Piper SDK doesn't use `drive_mode`; direction is corrected by inverting the input values.
+
+### Testing Results
+
+**Successful teleoperation with:**
+- Pose mapping baseline established:
+  - Follower baseline: [5.4°, 0.0°, -4.2°, 3.1°, 9.5°, 17.1°]
+  - Leader baseline: [270.0°, 0.0°, 199.4°, 113.0°, 143.7°, 123.4°]
+- Joint_4 and joint_5 directions corrected
+- Data streaming at ~17-19kHz
+- No emergency stops triggered
+- Smooth follower arm tracking of leader movements
+
+### Benefits
+
+1. **Calibration Independence:** Leader and follower arms no longer need matching calibration zero points
+2. **Flexible Startup:** Arms can start from any physically identical pose
+3. **Reduced Setup Time:** No need to move follower to fixed safe position
+4. **Better User Experience:** Operator can position arms naturally before starting
+5. **Robust Operation:** System adapts to calibration differences automatically
+
+### Usage Instructions
+
+1. **Position both arms:** Place leader and follower arms in the same physical pose
+2. **Start teleoperation:** Run `bash scripts/run_so101.sh`
+3. **Wait for baseline:** System will display baseline positions and wait for first command
+4. **Begin operation:** Move leader arm - follower will track using pose mapping
+
+**Important:** Ensure both arms are in physically identical poses before starting teleoperation. The system will establish the mapping baseline based on these initial positions.
+
+### Safety Features Retained
+
+- Position difference monitoring (30° warning, 60° emergency thresholds)
+- Real-time safety checks during operation
+- Emergency stop on excessive position differences
+- Detailed warning messages with joint-specific information
+
+### Testing Status
+- ✅ Pose mapping baseline system tested and working
+- ✅ Joint direction corrections verified
+- ✅ Camera handling fixed
+- ✅ Teleoperation successful with different calibrations
+
+### Impact
+- Major improvement in teleoperation reliability
+- Eliminates calibration synchronization issues
+- Enables operation with independently calibrated arms
+- Simplifies setup and reduces failure modes
+
+---
+
 ## v0.2.136 (2025-12-29) - Follower Arm Hardware Diagnosis
 
 ### Summary

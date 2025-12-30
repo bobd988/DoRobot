@@ -55,30 +55,29 @@ def main():
     # Sending this in every loop can cause jerky motion as it resets the planner.
     piper.MotionCtrl_2(0x01, 0x01, 60, 0x00)
 
-    # SAFETY: Move to safe home position before starting teleoperation
-    # This prevents sudden large movements that could blow the fuse
-    # Position obtained from actual arm state: 2025-12-29 (zero position reference)
-    # This is the closest position to zero that Piper can reach
-    print("[Piper] 移动到安全初始位置...")
-    safe_home_position = [5370, -2113, 3941, 3046, 18644, 24400]
-    piper.JointCtrl(
-        safe_home_position[0],
-        safe_home_position[1],
-        safe_home_position[2],
-        safe_home_position[3],
-        safe_home_position[4],
-        safe_home_position[5]
-    )
-    time.sleep(3)  # Wait for arm to reach home position
-    print("[Piper] 已到达安全初始位置，准备开始遥操作")
+    # Pose mapping: Read current follower position as baseline (safe position)
+    # This allows teleoperation even when leader/follower calibrations differ
+    print("[Piper] 读取当前从臂位置作为安全基准...")
+    current_joint = piper.GetArmJointMsgs()
+    follower_baseline = [
+        current_joint.joint_state.joint_1.real,
+        current_joint.joint_state.joint_2.real,
+        current_joint.joint_state.joint_3.real,
+        current_joint.joint_state.joint_4.real,
+        current_joint.joint_state.joint_5.real,
+        current_joint.joint_state.joint_6.real,
+    ]
+    print(f"[Piper] 从臂安全位置（度）: {[f'{p/1000:.1f}' for p in follower_baseline]}")
+    print("[Piper] 等待首次主臂命令以建立映射...")
 
     ctrl_frame = 0
-    first_command_received = False  # Track if we've received first command from leader
+    first_command_received = False
+    leader_baseline = None  # Will be set on first command
 
     # Safety monitoring configuration
-    POSITION_DIFF_WARNING = 60000  # 60 degrees - print warning
-    POSITION_DIFF_EMERGENCY = 80000  # 80 degrees - emergency stop
-    monitor_interval = 0.5  # Print monitoring info every 0.5 seconds
+    POSITION_DIFF_WARNING = 30000  # 30 degrees - print warning during operation
+    POSITION_DIFF_EMERGENCY = 60000  # 60 degrees - emergency stop during operation
+    monitor_interval = 0.5
     last_monitor_time = time.time()
     emergency_stop = False
 
@@ -95,20 +94,22 @@ def main():
                 if ctrl_frame > 0:
                     continue
 
-                # Emergency stop check
                 if emergency_stop:
                     print("[Piper] 紧急停止状态，拒绝执行命令")
                     continue
 
-                # Do not push to many commands to fast. Limiting it to 30Hz
                 if time.time() - elapsed_time > 0.03:
                     elapsed_time = time.time()
                 else:
                     continue
 
-                position = event["value"].to_numpy()
+                position = event["value"].to_numpy().copy()
 
-                # Get current follower arm position for monitoring
+                # Invert joint_4 and joint_5 (index 3, 4) from leader arm - direction compensation
+                position[3] = -position[3]
+                position[4] = -position[4]
+
+                # Get current follower arm position
                 current_joint = piper.GetArmJointMsgs()
                 current_positions = [
                     current_joint.joint_state.joint_1.real,
@@ -119,65 +120,49 @@ def main():
                     current_joint.joint_state.joint_6.real,
                 ]
 
-                target_positions = [
-                    round(position[0] * factor),
-                    round(position[1] * factor),
-                    round(position[2] * factor),
-                    round(position[3] * factor),
-                    round(position[4] * factor),
-                    round(position[5] * factor),
-                ]
+                # On first command: record leader baseline position
+                if not first_command_received:
+                    leader_baseline = [position[i] * factor for i in range(6)]
+                    first_command_received = True
+                    print("[Piper] 姿态映射基准已建立")
+                    print(f"  主臂基准（度）: {[f'{p/1000:.1f}' for p in leader_baseline]}")
+                    print(f"  从臂基准（度）: {[f'{p/1000:.1f}' for p in follower_baseline]}")
+                    print("[Piper] 开始遥操作控制")
 
-                # Calculate position differences
+                # Apply pose mapping: target = follower_baseline + (leader_current - leader_baseline)
+                leader_current = [position[i] * factor for i in range(6)]
+                leader_offset = [leader_current[i] - leader_baseline[i] for i in range(6)]
+                target_positions = [follower_baseline[i] + leader_offset[i] for i in range(6)]
+
+                # Safety check: monitor movement speed (difference from current position)
                 position_diffs = [abs(target_positions[i] - current_positions[i]) for i in range(6)]
                 max_diff = max(position_diffs)
                 max_diff_joint = position_diffs.index(max_diff)
 
-                # SAFETY: Check for emergency stop condition
                 if max_diff > POSITION_DIFF_EMERGENCY:
                     emergency_stop = True
                     print("\n" + "="*70)
-                    print("[Piper] ⚠️  紧急停止！位置差异过大！")
+                    print("[Piper] ⚠️  紧急停止！移动速度过快！")
                     print("="*70)
                     print(f"关节 {max_diff_joint + 1} 差异: {max_diff/1000:.1f}度 (阈值: {POSITION_DIFF_EMERGENCY/1000}度)")
                     print(f"当前位置: {[p/1000 for p in current_positions]}")
                     print(f"目标位置: {[p/1000 for p in target_positions]}")
-                    print(f"各关节差异(度): {[d/1000 for d in position_diffs]}")
-                    print("\n请检查：")
-                    print("1. 主臂是否移动过快")
-                    print("2. 主臂和从臂是否对齐")
-                    print("3. 机械臂是否遇到障碍物")
-                    print("\n程序已停止，请重启系统")
                     print("="*70)
                     break
 
-                # SAFETY: On first command, check if position difference is too large
-                if not first_command_received:
-                    if max_diff > POSITION_DIFF_WARNING:
-                        print(f"[Piper] 警告：主从臂位置差异过大 ({max_diff/1000:.1f}度)")
-                        print("[Piper] 请将主臂移动到接近从臂当前位置后再开始遥操作")
-                        print(f"[Piper] 从臂当前位置: {[p/1000 for p in current_positions]}")
-                        print(f"[Piper] 主臂目标位置: {[p/1000 for p in target_positions]}")
-                        # Skip this command and wait for better alignment
-                        continue
-
-                    first_command_received = True
-                    print("[Piper] 开始遥操作控制")
-
-                # Periodic monitoring output
                 if time.time() - last_monitor_time > monitor_interval:
                     last_monitor_time = time.time()
                     if max_diff > POSITION_DIFF_WARNING:
-                        print(f"[Piper] ⚠️  警告：关节{max_diff_joint + 1}差异 {max_diff/1000:.1f}度 | 差异: {[f'{d/1000:.1f}' for d in position_diffs]}")
+                        print(f"[Piper] ⚠️  警告：关节{max_diff_joint + 1}差异 {max_diff/1000:.1f}度")
 
-                joint_0 = round(position[0] * factor)
-                joint_1 = round(position[1] * factor)
-                joint_2 = round(position[2] * factor)
-                joint_3 = round(position[3] * factor)
-                joint_4 = round(position[4] * factor)
-                joint_5 = round(position[5] * factor)
-
-                piper.JointCtrl(joint_0, joint_1, joint_2, joint_3, joint_4, joint_5)
+                piper.JointCtrl(
+                    round(target_positions[0]),
+                    round(target_positions[1]),
+                    round(target_positions[2]),
+                    round(target_positions[3]),
+                    round(target_positions[4]),
+                    round(target_positions[5])
+                )
                 if len(position) > 6 and not np.isnan(position[6]):
                     piper.GripperCtrl(int(abs(position[6] * 1000 * 1000)), 1000, 0x01, 0)
 

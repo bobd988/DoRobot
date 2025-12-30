@@ -17,6 +17,7 @@ nodes:
       ARM_NAME: SO101-leader
       ARM_ROLE: leader
       CALIBRATION_DIR: ./.calibration/
+      USE_DEGRESS: "False"
       PYTHON: /home/demo/miniconda3/envs/dorobot/bin/python3
 
 

@@ -272,7 +272,7 @@ class SO101Manipulator:
         
         self.cameras = make_cameras_from_configs(self.config.cameras)
         
-        self.connect_excluded_cameras = ["image_pika_pose"]
+        self.connect_excluded_cameras = ["image_pika_pose", "image_top", "image_wrist"]
 
         self.recv_image_thread = threading.Thread(target=recv_image_server, daemon=True)
         self.recv_image_thread.start()
@@ -582,10 +582,12 @@ class SO101Manipulator:
         images = {}
         for name in self.cameras:
             now = time.perf_counter()
-            images[name] = recv_images[name]
-            self.logs[f"read_camera_{name}_dt_s"] = time.perf_counter() - now
+            if name in recv_images:
+                images[name] = recv_images[name]
+                self.logs[f"read_camera_{name}_dt_s"] = time.perf_counter() - now
 
         # for name in self.cameras:
+        for name in images:
             obs_dict[f"{name}"] = images[name]
 
         # print("end teleoperate record")

@@ -17,6 +17,7 @@
 
 | 日期 | 内容 | 对应版本 |
 |------|------|----------|
+| 2025-12-30 | 姿态映射基准系统 | [v0.2.137](RELEASE.md#v0.2.137) |
 | 2025-12-29 | 从臂硬件故障诊断 | [v0.2.136](RELEASE.md#v0.2.136) |
 | 2025-12-29 | LeRobot研究、标定工具、Q&A整合 | [v0.2.135](RELEASE.md#v0.2.135) |
 | 2025-12-26 | 关节映射修复、电机配置、诊断工具 | [v0.2.134](RELEASE.md#v0.2.134) |
@@ -24,7 +25,268 @@
 
 ---
 
-# 第零部分：从臂硬件故障诊断
+# 第零部分：姿态映射基准系统
+
+**对应版本：** [v0.2.137](RELEASE.md#v0.2.137)
+
+---
+
+## 问题：重新标定主臂后遥操作失败
+
+### 症状描述
+
+**现象：**
+- 重新标定主臂（SO101 Leader）后，遥操作无法启动
+- 主臂标定使用关节中点作为初始参考点
+- 从臂（Piper）无法物理移动到主臂定义的安全位置
+- 角度差异过大，触发紧急停止
+- 即使调整安全阈值，遥操作仍然不稳定
+
+**影响范围：**
+- 主从臂标定零点不匹配
+- 遥操作启动失败
+- 系统持续报警"位置差异过大"
+
+### 根本原因
+
+**标定零点不匹配：**
+- 主臂标定：使用关节运动范围的中点作为参考
+- 从臂安全位置：固定的物理姿态 `[5.4°, 0.0°, -4.2°, 3.1°, 9.5°, 17.1°]`
+- 两者不在同一物理位置，导致角度差异巨大
+
+**传统方案的局限：**
+```python
+# 旧方案：强制从臂移动到固定安全位置
+safe_home_position = [5982, -1128, 3940, -19218, 18869, 40103]
+piper.JointCtrl(*safe_home_position)
+
+# 问题：
+# 1. 如果主臂标定的零点不在这个位置，会有巨大差异
+# 2. 从臂被强制移动，可能不是操作员期望的起始位置
+# 3. 每次重新标定主臂，都需要重新调整这个固定位置
+```
+
+### 解决方案：姿态映射基准系统
+
+#### 核心思想
+
+**不要求主从臂标定零点相同，只要求相对运动一致**
+
+```python
+# 新方案：动态建立姿态映射基准
+# 1. 读取当前从臂位置作为基准
+follower_baseline = read_current_follower_position()
+
+# 2. 等待首次主臂命令，记录主臂基准
+leader_baseline = read_first_leader_command()
+
+# 3. 应用偏移映射
+leader_offset = leader_current - leader_baseline
+target = follower_baseline + leader_offset
+```
+
+**优势：**
+- 主从臂可以从任何物理姿态开始
+- 不需要强制移动到固定位置
+- 标定零点可以不同，只要相对运动一致
+- 操作员可以自然地摆放机械臂
+
+#### 实现细节
+
+**文件：** `operating_platform/robot/components/arm_normal_piper_v2/main.py`
+
+**步骤1：启动时读取从臂基准（第58-71行）**
+```python
+print("[Piper] 读取当前从臂位置作为安全基准...")
+current_joint = piper.GetArmJointMsgs()
+follower_baseline = [
+    current_joint.joint_state.joint_1.real,
+    current_joint.joint_state.joint_2.real,
+    current_joint.joint_state.joint_3.real,
+    current_joint.joint_state.joint_4.real,
+    current_joint.joint_state.joint_5.real,
+    current_joint.joint_state.joint_6.real,
+]
+print(f"[Piper] 从臂安全位置（度）: {[f'{p/1000:.1f}' for p in follower_baseline]}")
+print("[Piper] 等待首次主臂命令以建立映射...")
+```
+
+**步骤2：首次命令时记���主臂基准（第120-129行）**
+```python
+if not first_command_received:
+    leader_baseline = [position[i] * factor for i in range(6)]
+    first_command_received = True
+    print("[Piper] 姿态映射基准已建立")
+    print(f"  主臂基准（度）: {[f'{p/1000:.1f}' for p in leader_baseline]}")
+    print(f"  从臂基准（度）: {[f'{p/1000:.1f}' for p in follower_baseline]}")
+    print("[Piper] 开始遥操作控制")
+```
+
+**步骤3：应用姿态映射（第131-134行）**
+```python
+# 计算主臂相对于基准的偏移
+leader_current = [position[i] * factor for i in range(6)]
+leader_offset = [leader_current[i] - leader_baseline[i] for i in range(6)]
+
+# 从臂目标 = 从臂基准 + 主臂偏移
+target_positions = [follower_baseline[i] + leader_offset[i] for i in range(6)]
+```
+
+#### 关节方向修正
+
+**问题：** 关节4和关节5运动方向相反
+
+**解决方案：** 在读取主臂数据后立即反转（第106-110行）
+```python
+position = event["value"].to_numpy().copy()
+
+# 反转关节4和关节5的方向
+position[3] = -position[3]  # joint_4
+position[4] = -position[4]  # joint_5
+```
+
+**注意：** 这与 `drive_mode` 参数不同
+- `drive_mode`：用于主臂（SO101）的 Feetech 电机配置
+- 方向反转：用于从臂（Piper）的 SDK 输入值修正
+- Piper SDK 不使用 `drive_mode`，通过反转输入值实现方向修正
+
+### 配套修改
+
+#### 1. 准备脚本不再强制移动
+
+**文件：** `scripts/prepare_follower.py`（第91-96行）
+
+```python
+# 旧代码：强制移动到固定位置
+# piper.JointCtrl(*SAFE_HOME_POSITION)
+
+# 新代码：仅检查状态，不移动
+print("[Follower Prepare] ✓ 从臂状态正常")
+print("[Follower Prepare] ℹ️  使用姿态映射方案 - 将在遥操开始时建立基准")
+print("[Follower Prepare] ℹ️  请确保主臂和从臂处于相同的物理姿态")
+print("[Follower Prepare] ✓ 准备完成，可以开始遥操作")
+```
+
+#### 2. 摄像头处理优化
+
+**文件：** `operating_platform/robot/robots/so101_v1/manipulator.py`
+
+**问题：** 系统没有物理摄像头，导致连接超时
+
+**解决方案：**
+- 第275行：排除摄像头连接检查
+  ```python
+  self.connect_excluded_cameras = ["image_pika_pose", "image_top", "image_wrist"]
+  ```
+- 第581-591行：优雅处理缺失的摄像头图像
+  ```python
+  images = {}
+  for name in self.cameras:
+      if name in recv_images:
+          images[name] = recv_images[name]
+  ```
+
+### 使用方法
+
+**标准操作流程：**
+
+1. **摆放机械臂**
+   - 将主臂和从臂放置在相同的物理姿态
+   - 不需要是特定位置，只要两个臂物理上对应即可
+
+2. **启动遥操作**
+   ```bash
+   bash scripts/run_so101.sh
+   ```
+
+3. **等待基准建立**
+   ```
+   [Piper] 读取当前从臂位置作为安全基准...
+   [Piper] 从臂安全位置（度）: ['5.4', '0.0', '-4.2', '3.1', '9.5', '17.1']
+   [Piper] 等待首次主臂命令以建立映射...
+   ```
+
+4. **开始操作**
+   - 移动主臂
+   - 系统自动建立映射基准
+   ```
+   [Piper] 姿态映射基准已建立
+     主臂基准（度）: ['270.0', '0.0', '199.4', '113.0', '143.7', '123.4']
+     从臂基准（度）: ['5.4', '0.0', '-4.2', '3.1', '9.5', '17.1']
+   [Piper] 开始遥操作控制
+   ```
+
+5. **正常遥操作**
+   - 从臂会跟随主臂的相对运动
+   - 安全监控持续运行（30°警告，60°紧急停止）
+
+### 测试结果
+
+**成功案例：**
+```
+姿态映射基准已建立：
+  主臂基准: [270.0°, 0.0°, 199.4°, 113.0°, 143.7°, 123.4°]
+  从臂基准: [5.4°, 0.0°, -4.2°, 3.1°, 9.5°, 17.1°]
+
+数据流速率: ~17-19kHz
+紧急停止: 无
+遥操作效果: 流畅，从臂准确跟随主臂运动
+```
+
+**关键指标：**
+- ✅ 主从臂标定零点可以完全不同
+- ✅ 不需要强制移动到固定位置
+- ✅ 关节方向正确（joint_4 和 joint_5 已修正）
+- ✅ 安全监控正常工作
+- ✅ 遥操作稳定可靠
+
+### 优势总结
+
+1. **标定独立性**
+   - 主从臂可以独立标定
+   - 不需要标定零点匹配
+   - 重新标定主臂不影响遥操作
+
+2. **灵活的起始位置**
+   - 可以从任何物理姿态开始
+   - 不需要移动到固定安全位置
+   - 操作员可以自然摆放机械臂
+
+3. **简化设置流程**
+   - 减少准备步骤
+   - 降低失败风险
+   - 提高用户体验
+
+4. **鲁棒性提升**
+   - 自动适应标定差异
+   - 动态建立映射关系
+   - 减少人为错误
+
+### 与 LeRobot 方案的对比
+
+**LeRobot 方案：**
+- 独立校准主从臂
+- 通过校准数据建立逻辑角度空间映射
+- 需要完整的校准流程
+
+**DoRobot 姿态映射方案：**
+- 运行时动态建立映射
+- 基于当前物理位置
+- 无需重新校准
+- 更灵活，更易用
+
+**核心理念相同：** 不要求绝对零点相同，只要求相对运动一致
+
+### 相关文件
+
+- **主程序：** `operating_platform/robot/components/arm_normal_piper_v2/main.py`
+- **准备脚本：** `scripts/prepare_follower.py`
+- **机器人控制：** `operating_platform/robot/robots/so101_v1/manipulator.py`
+- **版本记录：** [v0.2.137](RELEASE.md#v0.2.137)
+
+---
+
+# 第一部分：从臂硬件故障诊断
 
 **对应版本：** [v0.2.136](RELEASE.md#v0.2.136)
 

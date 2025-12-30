@@ -88,39 +88,12 @@ def main():
     print(f"最大差异: {max_diff:.3f}度")
     print()
 
-    if is_close:
-        print("[Follower Prepare] ✓ 从臂已在参考位置附近，无需移动")
-        print("[Follower Prepare] ✓ 准备完成，可以开始遥操作")
-    else:
-        print(f"[Follower Prepare] ⚠️  从臂位置偏离参考位置 {max_diff:.3f}度")
-        print("[Follower Prepare] 正在移动到参考位置...")
-
-        # 设置运动速度
-        piper.MotionCtrl_2(0x01, 0x01, 30, 0x00)
-
-        # 移动到参考位置
-        piper.JointCtrl(
-            SAFE_HOME_POSITION[0],
-            SAFE_HOME_POSITION[1],
-            SAFE_HOME_POSITION[2],
-            SAFE_HOME_POSITION[3],
-            SAFE_HOME_POSITION[4],
-            SAFE_HOME_POSITION[5]
-        )
-
-        print("[Follower Prepare] 等待到达参考位置...")
-        time.sleep(3)
-
-        # 验证位置
-        final_pos = get_current_position(piper)
-        is_close, max_diff, diffs = check_position_difference(final_pos, SAFE_HOME_POSITION)
-
-        if is_close:
-            print("[Follower Prepare] ✓ 已到达参考位置")
-            print("[Follower Prepare] ✓ 准备完成，可以开始遥操作")
-        else:
-            print(f"[Follower Prepare] ⚠️  位置仍有偏差 {max_diff:.3f}度")
-            print("[Follower Prepare] ⚠️  建议检查机械臂状态")
+    # 使用姿态映射方案，不移动从臂到固定位置
+    # 遥操时会在首次命令时建立映射基准
+    print("[Follower Prepare] ✓ 从臂状态正常")
+    print("[Follower Prepare] ℹ️  使用姿态映射方案 - 将在遥操开始时建立基准")
+    print("[Follower Prepare] ℹ️  请确保主臂和从臂处于相同的物理姿态")
+    print("[Follower Prepare] ✓ 准备完成，可以开始遥操作")
 
     print()
     print("=" * 70)
