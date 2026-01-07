@@ -38,11 +38,14 @@ def calculate_calibrated_angle(pwm_val, calib_data, norm_mode):
 
 def calculate_homing_offset(pwm_val, target_millidegrees, range_min, range_max, norm_mode, drive_mode=0):
     """
-    计算 homing_offset 使得当前 PWM 读数产生目标值
+    计算 homing_offset 使得当前 PWM 读数映射到物理范围的中间位置
+
+    新策略：将当前位置映射到 135° (范围中点)，确保两个方向都有对称的运动空间。
+    姿态映射系统会通过 baseline 机制自动处理主从臂的位置差异。
 
     Args:
         pwm_val: 当前 PWM 值
-        target_millidegrees: 目标读数（毫度）
+        target_millidegrees: 目标读数（毫度）- 此参数已废弃，保留用于兼容性
         range_min, range_max: PWM 范围
         norm_mode: 归一化模式
         drive_mode: 驱动模式（0 或 1）
@@ -50,25 +53,18 @@ def calculate_homing_offset(pwm_val, target_millidegrees, range_min, range_max, 
     Returns:
         (homing_offset, drive_mode)
     """
-    target_degrees = target_millidegrees / 1000.0
-
+    # 忽略 target_millidegrees，始终映射到范围中点
     if norm_mode == MotorNormMode.RADIANS:
-        # 检查是否需要负角度
-        if target_degrees < 0:
-            # 使用 drive_mode=1 来产生负角度
-            target_degrees = abs(target_degrees)
-            drive_mode = 1
-        else:
-            drive_mode = 0
-
-        # 计算需要的 calibrated_pwm
+        # 将当前位置映射到 135° (0-270° 的中点)
         # degrees = ((calibrated_pwm - range_min) / (range_max - range_min)) * 270.0
+        target_degrees = 135.0
+        drive_mode = 0  # 中点位置不需要负角度
         calibrated_pwm = (target_degrees / 270.0) * (range_max - range_min) + range_min
 
     elif norm_mode == MotorNormMode.RANGE_0_100:
-        # gripper 使用 RANGE_0_100
-        # norm = ((calibrated_pwm - range_min) / (range_max - range_min)) * 100.0
-        calibrated_pwm = (target_degrees / 100.0) * (range_max - range_min) + range_min
+        # gripper 使用 RANGE_0_100，映射到 50 (0-100 的中点)
+        target_value = 50.0
+        calibrated_pwm = (target_value / 100.0) * (range_max - range_min) + range_min
 
     # 计算 homing_offset
     homing_offset = pwm_val - calibrated_pwm
@@ -99,30 +95,30 @@ def scan_leader_servos(port, id_range=(0, 6)):
 
 
 def read_leader_arm(port, calib_file):
-    """读取主臂位置（返回PWM和度数）- 7个关节（ID 0-6 → joint_1-6 + gripper）"""
+    """读取主臂位置（返回PWM和度数）- 7个关节（ID 0-6 → joint_0-5 + gripper）"""
     with open(calib_file, 'r') as f:
         calib_data = json.load(f)
 
-    # 新命名：ID 0→joint_1, ID 1→joint_2, ..., ID 5→joint_6, ID 6→gripper
+    # 命名：ID 0→joint_0, ID 1→joint_1, ..., ID 5→joint_5, ID 6→gripper
     motors = {
-        "joint_1": Motor(0, "zhonglin", MotorNormMode.RADIANS),
-        "joint_2": Motor(1, "zhonglin", MotorNormMode.RADIANS),
-        "joint_3": Motor(2, "zhonglin", MotorNormMode.RADIANS),
-        "joint_4": Motor(3, "zhonglin", MotorNormMode.RADIANS),
-        "joint_5": Motor(4, "zhonglin", MotorNormMode.RADIANS),
-        "joint_6": Motor(5, "zhonglin", MotorNormMode.RADIANS),
+        "joint_0": Motor(0, "zhonglin", MotorNormMode.RADIANS),
+        "joint_1": Motor(1, "zhonglin", MotorNormMode.RADIANS),
+        "joint_2": Motor(2, "zhonglin", MotorNormMode.RADIANS),
+        "joint_3": Motor(3, "zhonglin", MotorNormMode.RADIANS),
+        "joint_4": Motor(4, "zhonglin", MotorNormMode.RADIANS),
+        "joint_5": Motor(5, "zhonglin", MotorNormMode.RADIANS),
         "gripper": Motor(6, "zhonglin", MotorNormMode.RADIANS),
     }
 
-    # 映射新名称到旧标定文件键名
+    # 直接使用相同的键名（不需要映射）
     calib_key_map = {
-        "joint_1": "joint_1",  # ID 0 → 使用joint_1的标定（如果存在）
-        "joint_2": "joint_1",  # ID 1 → 使用旧joint_1的标定
-        "joint_3": "joint_2",  # ID 2 → 使用旧joint_2的标定
-        "joint_4": "joint_3",  # ID 3 → 使用旧joint_3的标定
-        "joint_5": "joint_4",  # ID 4 → 使用旧joint_4的标定
-        "joint_6": "joint_5",  # ID 5 → 使用旧joint_5的标定
-        "gripper": "gripper",  # ID 6 → 使用gripper的标定
+        "joint_0": "joint_0",
+        "joint_1": "joint_1",
+        "joint_2": "joint_2",
+        "joint_3": "joint_3",
+        "joint_4": "joint_4",
+        "joint_5": "joint_5",
+        "gripper": "gripper",
     }
 
     bus = ZhonglinMotorsBus(port=port, motors=motors, baudrate=115200)
@@ -246,7 +242,7 @@ def main():
 
         for i in range(7):
             if i < 6:
-                joint_name = f"joint_{i+1}"
+                joint_name = f"joint_{i}"
             else:
                 joint_name = "gripper"
 
@@ -311,6 +307,11 @@ def main():
             print()
             print("【开始标定】")
             print()
+            print("标定策略说明:")
+            print("  - 将主臂当前位置映射到物理范围的中点（135°）")
+            print("  - 确保两个方向都有对称的运动空间")
+            print("  - 姿态映射系统会通过 baseline 机制处理主从臂位置差异")
+            print()
 
             # 读取当前标定文件
             with open(calib_file, 'r') as f:
@@ -319,20 +320,20 @@ def main():
             # 计算新的标定参数
             new_calib = {}
 
-            # 映射新名称到旧标定文件键名（用于读取range_min/max）
+            # 直接使用相同的键名（不需要映射）
             calib_key_map = {
+                "joint_0": "joint_0",
                 "joint_1": "joint_1",
-                "joint_2": "joint_1",
-                "joint_3": "joint_2",
-                "joint_4": "joint_3",
-                "joint_5": "joint_4",
-                "joint_6": "joint_5",
+                "joint_2": "joint_2",
+                "joint_3": "joint_3",
+                "joint_4": "joint_4",
+                "joint_5": "joint_5",
                 "gripper": "gripper",
             }
 
             for i in range(7):
                 if i < 6:
-                    joint_name = f"joint_{i+1}"
+                    joint_name = f"joint_{i}"
                 else:
                     joint_name = "gripper"
 
@@ -358,10 +359,16 @@ def main():
                     # 使用实际的物理ID（0-6）
                     motor_id = i
 
+                    # 确定归一化模式
+                    if joint_name == "gripper":
+                        norm_mode = MotorNormMode.RANGE_0_100
+                    else:
+                        norm_mode = MotorNormMode.RADIANS
+
                     # 计算新的homing_offset
                     new_homing_offset, new_drive_mode = calculate_homing_offset(
                         pwm_val, target_millidegrees, range_min, range_max,
-                        MotorNormMode.RADIANS, old_drive_mode
+                        norm_mode, old_drive_mode
                     )
 
                     new_calib[joint_name] = {
@@ -372,7 +379,13 @@ def main():
                         "range_max": range_max
                     }
 
-                    print(f"[{i}] {joint_name}: ID={motor_id} PWM={pwm_val} 目标={follower:.0f}毫度 新offset={new_homing_offset} drive_mode={new_drive_mode}")
+                    # 计算映射到范围中点的角度
+                    range_size = range_max - range_min
+                    middle_angle = 135.0 if norm_mode == MotorNormMode.RADIANS else 50.0
+
+                    print(f"[{i}] {joint_name}: ID={motor_id} PWM={pwm_val} 范围={range_min}-{range_max}({range_size}单位)")
+                    print(f"    映射策略: 当前位置 → {middle_angle:.0f}° (范围中点)")
+                    print(f"    新offset={new_homing_offset} drive_mode={new_drive_mode}")
 
             # 保存新标定文件
             with open(calib_file, 'w') as f:

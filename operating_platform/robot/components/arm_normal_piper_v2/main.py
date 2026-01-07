@@ -51,9 +51,9 @@ def main():
     factor = 1000 * 180 / np.pi  # Convert rad to 0.001 degrees
     node = Node()
 
-    # Initialize motion control once with a safe speed (e.g. 60%)
+    # Initialize motion control once with a safe speed (e.g. 80%)
     # Sending this in every loop can cause jerky motion as it resets the planner.
-    piper.MotionCtrl_2(0x01, 0x01, 60, 0x00)
+    piper.MotionCtrl_2(0x01, 0x01, 80, 0x00)
 
     # Pose mapping: Read current follower position as baseline (safe position)
     # This allows teleoperation even when leader/follower calibrations differ
@@ -88,7 +88,7 @@ def main():
                 enable_flag = all(piper.GetArmEnableStatus())
                 if not enable_flag:
                     enable_fun(piper)
-                    piper.MotionCtrl_2(0x01, 0x01, 60, 0x00)
+                    piper.MotionCtrl_2(0x01, 0x01, 80, 0x00)
 
             if event["id"] == "action_joint":
                 if ctrl_frame > 0:

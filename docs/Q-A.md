@@ -1,9 +1,10 @@
 # DoRobot Q&A 文档
 
-**最后更新：** 2026-01-06
+**最后更新：** 2026-01-07
 **维护者：** DoRobot Team
 
 本文档整合了以下内容：
+- 主臂关节标定问题（joint_0 运动范围受限）
 - DORA 数据流通信问题诊断与修复
 - 推理系统模型加载与验证
 - 摄像头配置和图像数据接入
@@ -22,6 +23,7 @@
 
 | 日期 | 内容 | 对应版本 |
 |------|------|----------|
+| 2026-01-07 | 主臂 joint_0 标定问题修复 | [v0.2.140](RELEASE.md#v0.2.140) |
 | 2026-01-06 | DORA 数据流通信修复、推理系统诊断 | [v0.2.139](RELEASE.md#v0.2.139) |
 | 2026-01-05 | 摄像头配置、路径标准化、推理脚本改进 | [v0.2.138](RELEASE.md#v0.2.138) |
 | 2025-12-30 | 姿态映射基准系统 | [v0.2.137](RELEASE.md#v0.2.137) |
@@ -32,7 +34,354 @@
 
 ---
 
-# 第零部分：DORA 数据流通信问题
+# 第零部分：主臂关节标定问题
+
+**对应版本：** [v0.2.140](RELEASE.md#v0.2.140)
+
+---
+
+## 问题：joint_0 (底座旋转) 运动范围受限且抖动
+
+### 症状描述
+
+**现象：**
+- joint_0 (底座旋转关节) 只能向一个方向转动，另一个方向无法移动
+- 只有 joint_0 在数据采集时出现抖动/震动
+- 移动主臂从当前位置往 min 方向 → 从臂不动
+- 移动主臂从当前位置往 max 方向 → 从臂移动过快
+
+**影响范围：**
+- 仅 joint_0 受影响
+- 其他 6 个关节工作正常
+- 导致数据采集时机械臂不稳定
+
+### 根本原因
+
+**标定参数错误导致运动范围不对称：**
+
+1. **物理范围极小**：
+   - joint_0 的实际物理 PWM 范围：1221-1426
+   - 范围大小：仅 205 个单位 (≈ 27.7°)
+   - 这是该关节的真实物理限制
+
+2. **homing_offset 导致当前位置映射错误**：
+   ```python
+   当前 PWM 值：1303
+   原 homing_offset：92
+   校准后 PWM：1303 - 92 = 1211
+   range_min：1221
+
+   # 问题：1211 < 1221，被限制到 range_min
+   bounded_pwm = max(1221, 1211) = 1221
+
+   # 结果：当前位置被映射为 0°（最小值）
+   angle = (1221 - 1221) / (1426 - 1221) × 270° = 0°
+   ```
+
+3. **导致的问题**：
+   - 当前位置被当作运动范围的最小值
+   - 往 min 方向移动：已经在最小值，无法继续移动
+   - 往 max 方向移动：整个范围都可用，移动过快
+   - 运动范围不对称：0° → 270° (只能单向)
+
+### 解决方案
+
+#### 方案1：手动修正 joint_0 标定参数
+
+**文件：** `operating_platform/robot/components/arm_normal_so101_v1/.calibration/SO101-leader.json`
+
+**修改内容：**
+```json
+{
+    "joint_0": {
+        "id": 0,
+        "drive_mode": 0,
+        "homing_offset": -20,      // 从 92 改为 -20
+        "range_min": 1221,         // 从 1225 改为 1221 (实际物理最小值)
+        "range_max": 1426          // 从 1419 改为 1426 (实际物理最大值)
+    }
+}
+```
+
+**计算过程：**
+```python
+# 目标：将当前位置 (PWM 1303) 映射到范围中点 (135°)
+target_degrees = 135.0
+range_size = 1426 - 1221 = 205
+calibrated_pwm = (135.0 / 270.0) × 205 + 1221 = 1323.5
+
+# 计算 homing_offset
+homing_offset = 1303 - 1323.5 = -20.5 ≈ -20
+
+# 验证：
+calibrated_pwm = 1303 - (-20) = 1323
+angle = (1323 - 1221) / 205 × 270° = 134.4° ≈ 135° ✓
+```
+
+**结果：**
+- 当前位置映射到 135° (范围中点)
+- 对称的双向运动空间：±135°
+- 不再抖动，运动平滑
+
+#### 方案2：系统性修复 - 更新标定脚本
+
+**问题根源：**
+旧的 `calib_piper_ZL.py` 脚本试图将主臂位置映射到从臂位置：
+```python
+# 旧方法：
+# 读取从臂当前角度
+follower_angle = read_follower_joint()
+
+# 计算 homing_offset 使主臂输出相同角度
+homing_offset = calculate_to_match_follower(follower_angle)
+```
+
+**问题：**
+- 如果主从臂当前位置差异大，会导致运动范围不对称
+- joint_0 就是这个问题的受害者
+
+**新方法：映射到范围中点**
+
+**文件：** `scripts/calib_piper_ZL.py`
+
+**核心改进：**
+```python
+def calculate_homing_offset(pwm_val, target_millidegrees, range_min, range_max, norm_mode, drive_mode=0):
+    """
+    计算 homing_offset 使得当前 PWM 读数映射到物理范围的中间位置
+
+    新策略：将当前位置映射到 135° (范围中点)，确保两个方向都有对称的运动空间。
+    姿态映射系统会通过 baseline 机制自动处理主从臂的位置差异。
+    """
+    # 忽略 target_millidegrees，始终映射到范围中点
+    if norm_mode == MotorNormMode.RADIANS:
+        # 将当前位置映射到 135° (0-270° 的中点)
+        target_degrees = 135.0
+        drive_mode = 0  # 中点位置不需要负角度
+        calibrated_pwm = (target_degrees / 270.0) * (range_max - range_min) + range_min
+
+    elif norm_mode == MotorNormMode.RANGE_0_100:
+        # gripper 使用 RANGE_0_100，映射到 50 (0-100 的中点)
+        target_value = 50.0
+        calibrated_pwm = (target_value / 100.0) * (range_max - range_min) + range_min
+
+    # 计算 homing_offset
+    homing_offset = pwm_val - calibrated_pwm
+
+    return int(round(homing_offset)), drive_mode
+```
+
+**使用方法：**
+```bash
+# 1. 将主臂移动到当前位置（任意位置）
+# 2. 运行标定脚本
+python scripts/calib_piper_ZL.py --calibrate
+
+# 脚本会：
+# - 读取所有关节的当前 PWM 值
+# - 计算 homing_offset 使每个关节映射到范围中点
+# - 更新 SO101-leader.json
+```
+
+**输出示例：**
+```
+标定策略说明:
+  - 将主臂当前位置映射到物理范围的中点（135°）
+  - 确保两个方向都有对称的运动空间
+  - 姿态映射系统会通过 baseline 机制处理主从臂位置差异
+
+[0] joint_0: ID=0 PWM=1303 范围=1221-1426(205单位)
+    映射策略: 当前位置 → 135° (范围中点)
+    新offset=6 drive_mode=0
+
+[1] joint_1: ID=1 PWM=1028 范围=1028-2387(1359单位)
+    映射策略: 当前位置 → 135° (范围中点)
+    新offset=-672 drive_mode=0
+
+...
+
+✓ 标定完成！已保存到: SO101-leader.json
+```
+
+### 为什么映射到范围中点 (135°)?
+
+**核心理念：对称的运动空间**
+
+1. **对称性**：
+   - 135° 是 0-270° 的中点
+   - 两个方向都有 ±135° 的运动空间
+   - 避免单向运动受限
+
+2. **与 baseline 系统配合**：
+   ```python
+   # 遥操作启动时
+   leader_baseline = [135°, 135°, 135°, ...]  # 主臂基准（范围中点）
+   follower_baseline = [5.4°, 0°, -4.2°, ...]  # 从臂基准（当前位置）
+
+   # 遥操作过程中
+   leader_offset = leader_current - leader_baseline
+   target = follower_baseline + leader_offset
+
+   # 示例：
+   # 主臂从 135° 移动到 145° (+10°)
+   # 从臂从 5.4° 移动到 15.4° (+10°)
+   ```
+
+3. **不需要物理对齐**：
+   - 主臂可以在任何位置标定
+   - 从臂可以在任何位置启动
+   - baseline 系统自动处理位置差异
+
+4. **最大灵活性**：
+   - 充分利用整个物理运动范围
+   - 不会因为标定位置选择不当而限制运动
+
+### 标定后的结果
+
+**所有关节的标定参数：**
+
+| 关节 | homing_offset | range_min | range_max | 范围大小 | 映射角度 |
+|------|---------------|-----------|-----------|----------|----------|
+| joint_0 | 6 | 1221 | 1426 | 205 | 135° |
+| joint_1 | -672 | 1028 | 2387 | 1359 | 135° |
+| joint_2 | -53 | 500 | 2500 | 2000 | 135° |
+| joint_3 | 24 | 1064 | 2151 | 1087 | 135° |
+| joint_4 | 136 | 589 | 1933 | 1344 | 135° |
+| joint_5 | -16 | 702 | 2500 | 1798 | 135° |
+| gripper | 224 | 1363 | 1891 | 528 | 50% |
+
+**验证结果：**
+```
+主从臂最大差异: 998 毫度 (0.998 度)
+关节最大差异（不含夹爪）: 998 毫度 (0.998 度)
+✓ 主从臂关节位置对齐良好（差异 < 1度）
+```
+
+### 测试结果
+
+**遥操作测试：**
+- ✅ joint_0 现在有对称的双向运动
+- ✅ 数据采集时不再抖动
+- ✅ 所有关节响应正确
+- ✅ 运动平滑，无异常
+
+**数据采集测试：**
+- ✅ 可以采集完整的数据集
+- ✅ 机械臂稳定，无震动
+- ✅ 所有关节运动范围正常
+
+### 关键概念理解
+
+#### homing_offset 的作用
+
+**定义：** 将原始 PWM 值偏移到期望的角度输出
+
+**公式：**
+```python
+calibrated_pwm = raw_pwm - homing_offset
+angle = (calibrated_pwm - range_min) / (range_max - range_min) × 270°
+```
+
+**示例：**
+```python
+# joint_0 标定前
+raw_pwm = 1303
+homing_offset = 92
+calibrated_pwm = 1303 - 92 = 1211
+# 1211 < range_min (1221)，被限制到 1221
+angle = (1221 - 1221) / 205 × 270° = 0°  # 问题！
+
+# joint_0 标定后
+raw_pwm = 1303
+homing_offset = -20
+calibrated_pwm = 1303 - (-20) = 1323
+angle = (1323 - 1221) / 205 × 270° = 134.4° ≈ 135°  # 正确！
+```
+
+#### baseline 系统如何处理位置差异
+
+**问题：** 主臂标定在 135°，从臂当前在 5.4°，如何同步？
+
+**答案：** 不需要绝对位置相同，只需要相对运动一致
+
+**实现：**
+```python
+# 步骤1：记录基准位置
+leader_baseline = 135°    # 主臂当前位置
+follower_baseline = 5.4°  # 从臂当前位置
+
+# 步骤2：计算相对运动
+leader_current = 145°     # 主臂移动到新位置
+leader_offset = 145° - 135° = +10°
+
+# 步骤3：应用到从臂
+follower_target = 5.4° + 10° = 15.4°
+```
+
+**优势：**
+- 主从臂可以从任何位置开始
+- 不需要物理对齐
+- 自动处理标定差异
+- 用户体验好
+
+### 故障排查
+
+**如果标定后仍然有问题：**
+
+1. **检查 PWM 范围是否正确**：
+   ```bash
+   # 手动移动关节到物理极限
+   # 记录 PWM 值
+   python scripts/scan_leader_servos.py
+   ```
+
+2. **验证标定质量**：
+   ```bash
+   python scripts/calib_piper_ZL.py
+   # 查看主从臂位置差异
+   # 应该 < 5 度
+   ```
+
+3. **检查 homing_offset 计算**：
+   ```python
+   # 当前 PWM
+   current_pwm = 1303
+
+   # 目标：映射到 135°
+   target_calibrated_pwm = (135 / 270) × (range_max - range_min) + range_min
+
+   # homing_offset
+   homing_offset = current_pwm - target_calibrated_pwm
+
+   # 验证
+   calibrated = current_pwm - homing_offset
+   angle = (calibrated - range_min) / (range_max - range_min) × 270
+   # angle 应该 ≈ 135°
+   ```
+
+4. **重新标定**：
+   ```bash
+   # 如果计算有误，重新运行标定脚本
+   python scripts/calib_piper_ZL.py --calibrate
+   ```
+
+### 相关文件
+
+- **标定文件：** `operating_platform/robot/components/arm_normal_so101_v1/.calibration/SO101-leader.json`
+- **标定脚本：** `scripts/calib_piper_ZL.py`
+- **主臂控制：** `operating_platform/robot/components/arm_normal_so101_v1/main.py`
+- **从臂控制：** `operating_platform/robot/components/arm_normal_piper_v2/main.py`
+- **版本记录：** [v0.2.140](RELEASE.md#v0.2.140)
+
+### 相关问题
+
+- **姿态映射基准系统：** [v0.2.137](RELEASE.md#v0.2.137) - baseline 系统的实现
+- **主从臂标定对齐：** Q-A.md 第一部分 - 标定原理和方法
+- **标定方法对比：** 本文档前面的"主从臂标定的几种方法"章节
+
+---
+
+# 第一部分：DORA 数据流通信问题
 
 **对应版本：** [v0.2.139](RELEASE.md#v0.2.139)
 
