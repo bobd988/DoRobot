@@ -67,13 +67,13 @@ def env_to_bool(env_value: str, default: bool = True) -> bool:
 def configure_follower(bus: FeetechMotorsBus) -> None:
     with bus.torque_disabled():
         bus.configure_motors()
-        for motor in bus.motors:
+        for motor_name, motor in bus.motors.items():
             bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
-            # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
             bus.write("P_Coefficient", motor, 16)
-            # Set I_Coefficient and D_Coefficient to default value 0 and 32
             bus.write("I_Coefficient", motor, 0)
             bus.write("D_Coefficient", motor, 32)
+            bus.write("CW_Dead_Zone", motor, 4)
+            bus.write("CCW_Dead_Zone", motor, 4)
 
 def configure_leader(bus: FeetechMotorsBus) -> None:
     bus.disable_torque()
@@ -152,6 +152,10 @@ def main():
 
     ctrl_frame = 0
 
+    # Low-pass filter state for leader arm (smooths sensor noise)
+    filtered_positions = None
+    filter_alpha = 0.2  # Stronger filtering (was 0.3)
+
     for event in node:
         if event["type"] == "INPUT":
             if "action" in event["id"]:
@@ -178,6 +182,15 @@ def main():
                 present_pos = arm_bus.sync_read("Present_Position")
                 # SO101 now has 7 motors: joint_6 (ID 0) + 5 joints (ID 1-5) + gripper (ID 6)
                 joint_value = [val for _motor, val in present_pos.items()]
+
+                # Apply low-pass filter for leader arm to smooth sensor noise
+                if ARM_ROLE == "leader":
+                    joint_array = np.array(joint_value)
+                    if filtered_positions is None:
+                        filtered_positions = joint_array
+                    else:
+                        filtered_positions = filter_alpha * joint_array + (1 - filter_alpha) * filtered_positions
+                    joint_value = filtered_positions.tolist()
 
                 # Debug: print what we're sending (only print occasionally)
                 if ctrl_frame % 100 == 0:
