@@ -211,24 +211,24 @@ def train(cfg: TrainPipelineConfig):
                 batch[key] = batch[key].to(device, non_blocking=device.type == "cuda")
 
         # ===== 新增：打印 batch 信息（仅调试用）=====
-        print("\n" + "="*50)
-        print("BATCH CONTENTS DEBUG:")
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                # 张量：打印形状、dtype、设备
-                print(f"  Key: '{key}' | Type: Tensor | Shape: {value.shape} | "
-                    f"Dtype: {value.dtype} | Device: {value.device}")
-            elif isinstance(value, (list, tuple)):
-                # 列表/元组：打印长度和第一个元素的类型
-                container_type = "list" if isinstance(value, list) else "tuple"
-                elem_type = type(value[0]).__name__ if len(value) > 0 else "N/A"
-                print(f"  Key: '{key}' | Type: {container_type} | Length: {len(value)} | "
-                    f"First element type: {elem_type}")
-            else:
-                # 其他类型：打印类型和简短值（仅限基础类型）
-                val_repr = str(value)[:50] + "..." if isinstance(value, str) and len(value) > 50 else value
-                print(f"  Key: '{key}' | Type: {type(value).__name__} | Value: {val_repr}")
-        print("="*50 + "\n")
+        # print("\n" + "="*50)
+        # print("BATCH CONTENTS DEBUG:")
+        # for key, value in batch.items():
+        #     if isinstance(value, torch.Tensor):
+        #         # 张量：打印形状、dtype、设备
+        #         print(f"  Key: '{key}' | Type: Tensor | Shape: {value.shape} | "
+        #             f"Dtype: {value.dtype} | Device: {value.device}")
+        #     elif isinstance(value, (list, tuple)):
+        #         # 列表/元组：打印长度和第一个元素的类型
+        #         container_type = "list" if isinstance(value, list) else "tuple"
+        #         elem_type = type(value[0]).__name__ if len(value) > 0 else "N/A"
+        #         print(f"  Key: '{key}' | Type: {container_type} | Length: {len(value)} | "
+        #             f"First element type: {elem_type}")
+        #     else:
+        #         # 其他类型：打印类型和简短值（仅限基础类型）
+        #         val_repr = str(value)[:50] + "..." if isinstance(value, str) and len(value) > 50 else value
+        #         print(f"  Key: '{key}' | Type: {type(value).__name__} | Value: {val_repr}")
+        # print("="*50 + "\n")
         # ===== 打印结束 =====
 
         train_tracker, output_dict = update_policy(

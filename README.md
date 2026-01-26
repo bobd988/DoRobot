@@ -660,6 +660,7 @@ conda activate dorobot
 
 python operating_platform/core/inference.py \
   --robot.type=so101 \
+  
   --inference.dataset.repo_id="~/DoRobot/dataset/so101-test" \
   --inference.single_task="task description" \
   --policy.path="~/DoRobot/model"

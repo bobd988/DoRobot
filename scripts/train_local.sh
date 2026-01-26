@@ -12,9 +12,9 @@ DATASET_PATH=${1:-"/home/demo/Public/DoRobot/dataset/so101-test"}
 
 # 训练参数
 POLICY_TYPE="act"                    # 策略类型: act, diffusion, tdmpc, vqbet
-STEPS=500                            # 总训练步数
+STEPS=5000                            # 总训练步数
 BATCH_SIZE=16                        # 批次大小
-SAVE_FREQ=250                        # 每N步保存checkpoint
+SAVE_FREQ=2500                        # 每N步保存checkpoint
 EVAL_FREQ=250                        # 每N步评估一次
 LOG_FREQ=200                         # 每N步记录日志
 NUM_WORKERS=4                        # 数据加载线程数
