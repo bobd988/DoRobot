@@ -1,0 +1,87 @@
+nodes:
+  - id: tick
+    path: /home/demo/miniconda3/envs/dorobot/bin/python3
+    args: -u ./tick.py
+    outputs: [tick]
+    env:
+      TICK_HZ: "50"
+
+  - id: telegrip_https_ui
+    path: /home/demo/miniconda3/envs/dorobot/bin/python3
+    args: -u ./telegrip_https_ui.py
+    inputs:
+      tick: tick/tick
+    env:
+      TELEGRIP_ROOT: .
+      TELEGRIP_UI_DIR: ./web-ui
+      TELEGRIP_CERT: ./cert.pem
+      TELEGRIP_KEY: ./key.pem
+      TELEGRIP_UI_HOST: "0.0.0.0"
+      TELEGRIP_UI_PORT: "8443"
+
+  - id: vr_ws_in
+    path: /home/demo/miniconda3/envs/dorobot/bin/python3
+    args: -u ./vr_ws_in.py
+    inputs:
+      tick: tick/tick
+    outputs:
+      - vr_event
+    env:
+      VR_WS_PORT: "8442"
+      VR_PRINT_FIRST_N: "3"
+      VR_FLUSH_LOG_EVERY_SEC: "2"
+      TELEGRIP_CERT: "./cert.pem"
+      TELEGRIP_KEY: "./key.pem"
+
+  - id: command_mux
+    path: /home/demo/miniconda3/envs/dorobot/bin/python3
+    args: -u ./command_mux.py
+    inputs:
+      vr_event: vr_ws_in/vr_event
+    outputs: [arm_cmd]
+
+  - id: arm_to_jointcmd_ik
+    path: /home/demo/miniconda3/envs/dorobot/bin/python3
+    args: -u ./arm_to_jointcmd_ik.py
+    inputs:
+      arm_cmd: command_mux/arm_cmd
+      # joint: arm_so101_follower/joint  # 纯仿真模式：不需要真实机械臂反馈
+    outputs: [action_joint]
+    env:
+      URDF_PATH: "/home/demo/Public/DoRobot/operating_platform/teleop_vr/urdf/SO100/so100.urdf"
+      EE_LINK: "Fixed_Jaw_tip"
+      ARM_NAME: "SO101-follower"
+      CALIB_PATH: "/home/demo/Public/DoRobot/operating_platform/teleop_vr/.calibration/SO101-follower.json"
+      IK_HOME_POS: "0.20,0.00,0.00"  #机械臂的初始位置
+      IK_POS_MAP: "-z,-x,y"  # 将 VR 坐标系 (-z, -x, y) 映射到机器人坐标系 (x, y, z)
+      IK_POS_SCALE: "1,1,2"   # 确保初步测试时缩放因子为 1（根据需要调整）
+      IK_REQUIRE_JOINT_ON_ENABLE: "0"
+      IK_POS_OFFSET_X: "0.0"
+      IK_POS_OFFSET_Y: "0.0"
+      IK_POS_OFFSET_Z: "0.0"
+
+  - id: sim_viz
+    path: /home/demo/miniconda3/envs/dorobot/bin/python3
+    args: -u ./sim_viz.py
+    inputs:
+      tick: tick/tick
+      action_joint: arm_to_jointcmd_ik/action_joint   
+    env:
+      SIM_URDF: ./urdf/SO100/so100.urdf
+      SIM_PAN_SIGN: "-1"       
+      SIM_TICK_HZ: "50"
+
+  # - id: arm_so101_follower
+  #   path: /home/demo/miniconda3/envs/dorobot/bin/python3
+  #   args: -u /home/demo/Public/DoRobot/operating_platform/robot/components/arm_normal_so101_v1/main.py
+  #   inputs:
+  #     get_joint: dora/timer/millis/30
+  #     action_joint: arm_to_jointcmd_ik/action_joint
+  #   outputs: [joint]
+  #   env:
+  #     GET_DEVICE_FROM: PORT
+  #     PORT: /dev/ttyACM0
+  #     ARM_NAME: SO101-follower
+  #     ARM_ROLE: follower
+
+

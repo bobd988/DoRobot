@@ -69,18 +69,18 @@ def configure_follower(bus: FeetechMotorsBus) -> None:
     with bus.torque_disabled():
         bus.configure_motors()
         for motor_name, motor in bus.motors.items():
-            bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
-            bus.write("P_Coefficient", motor, 16)
-            bus.write("I_Coefficient", motor, 0)
-            bus.write("D_Coefficient", motor, 32)
-            bus.write("CW_Dead_Zone", motor, 4)
-            bus.write("CCW_Dead_Zone", motor, 4)
+            bus.write("Operating_Mode", motor_name, OperatingMode.POSITION.value)
+            bus.write("P_Coefficient", motor_name, 16)
+            bus.write("I_Coefficient", motor_name, 0)
+            bus.write("D_Coefficient", motor_name, 32)
+            bus.write("CW_Dead_Zone", motor_name, 4)
+            bus.write("CCW_Dead_Zone", motor_name, 4)
 
 def configure_leader(bus: FeetechMotorsBus) -> None:
     bus.disable_torque()
     bus.configure_motors()
-    for motor in bus.motors:
-        bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
+    for motor_name in bus.motors:
+        bus.write("Operating_Mode", motor_name, OperatingMode.POSITION.value)
 
 
 def main():

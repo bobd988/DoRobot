@@ -124,6 +124,32 @@ sudo apt install libportaudio2
 
 ## SO101 Robot Operations
 
+### 2.0 VR Remote Control (New!)
+
+DoRobot now supports VR remote control using Meta Quest headsets! Control the SO101 arm in real-time through an immersive VR interface.
+
+**Quick Start:**
+```bash
+cd operating_platform/teleop_vr
+./start_vr.sh
+```
+
+Then access `https://<robot-ip>:8443` from your Meta Quest browser.
+
+**Documentation:**
+- **User Guide**: See [README-VR.md](README-VR.md) for complete usage instructions
+- **Integration Guide**: See [VR_INTEGRATION_GUIDE.md](VR_INTEGRATION_GUIDE.md) for technical details
+- **Technical Docs**: See `operating_platform/teleop_vr/VR_SYSTEM_DOCUMENTATION.md`
+
+**Features:**
+- 50Hz real-time control
+- WebXR-based VR interface
+- PyBullet IK solver
+- Real-time simulation preview
+- Clutch mechanism for extended workspace
+
+---
+
 ### 2.1 Calibrate SO101 Arm
 
 Calibration files are stored in `arm_normal_so101_v1/.calibration`
