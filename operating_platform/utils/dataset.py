@@ -13,7 +13,11 @@ import datasets
 import jsonlines
 import numpy as np
 import packaging.version
+import pandas as pd
+import pyarrow.dataset as pa_ds
+import pyarrow.parquet as pq
 import torch
+from datasets import Dataset
 from datasets.table import embed_table_storage
 from huggingface_hub import DatasetCard, DatasetCardData, HfApi
 
@@ -27,18 +31,36 @@ from operating_platform.utils.utils import is_valid_numpy_dtype_string
 from operating_platform.config.types import DictLike, FeatureType, PolicyFeature
 
 
-DEFAULT_CHUNK_SIZE = 10000  # Max number of episodes per chunk
+# v3.0 chunking constants
+DEFAULT_CHUNK_SIZE = 1000  # Max number of files per chunk (was 10000 episodes in v2.1)
+DEFAULT_DATA_FILE_SIZE_IN_MB = 100  # Max size per data file
+DEFAULT_VIDEO_FILE_SIZE_IN_MB = 200  # Max size per video file
 
 INFO_PATH = "meta/info.json"
-EPISODES_PATH = "meta/episodes.jsonl"
 STATS_PATH = "meta/stats.json"
-EPISODES_STATS_PATH = "meta/episodes_stats.jsonl"
-TASKS_PATH = "meta/tasks.jsonl"
 
-DEFAULT_VIDEO_PATH = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-DEFAULT_AUDIO_PATH = "audio/chunk-{episode_chunk:03d}/{audio_key}/episode_{episode_index:06d}.wav"
-DEFAULT_PARQUET_PATH = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
-DEFAULT_IMAGE_PATH = "images/{image_key}/episode_{episode_index:06d}/frame_{frame_index:06d}.png"
+# v3.0 directory structure
+EPISODES_DIR = "meta/episodes"
+DATA_DIR = "data"
+VIDEO_DIR = "videos"
+AUDIO_DIR = "audio"
+
+# v3.0 path patterns (size-based chunking)
+CHUNK_FILE_PATTERN = "chunk-{chunk_index:03d}/file-{file_index:03d}"
+DEFAULT_TASKS_PATH = "meta/tasks.parquet"
+DEFAULT_EPISODES_PATH = EPISODES_DIR + "/" + CHUNK_FILE_PATTERN + ".parquet"
+DEFAULT_DATA_PATH = DATA_DIR + "/" + CHUNK_FILE_PATTERN + ".parquet"
+DEFAULT_VIDEO_PATH = VIDEO_DIR + "/{video_key}/" + CHUNK_FILE_PATTERN + ".mp4"
+DEFAULT_AUDIO_PATH = AUDIO_DIR + "/{audio_key}/" + CHUNK_FILE_PATTERN + ".wav"  # DoRobot custom
+DEFAULT_IMAGE_PATH = "images/{image_key}/episode-{episode_index:06d}/frame-{frame_index:06d}.png"
+
+# Legacy v2.1 paths (for backward compatibility and conversion)
+LEGACY_EPISODES_PATH = "meta/episodes.jsonl"
+LEGACY_EPISODES_STATS_PATH = "meta/episodes_stats.jsonl"
+LEGACY_TASKS_PATH = "meta/tasks.jsonl"
+LEGACY_VIDEO_PATH = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+LEGACY_AUDIO_PATH = "audio/chunk-{episode_chunk:03d}/{audio_key}/episode_{episode_index:06d}.wav"
+LEGACY_PARQUET_PATH = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
 
 DATASET_CARD_TEMPLATE = """
 ---
@@ -90,6 +112,183 @@ def unflatten_dict(d: dict, sep: str = "/") -> dict:
         d[parts[-1]] = value
     return outdict
 
+
+# ============================================================================
+# v3.0 Helper Functions
+# ============================================================================
+
+def update_chunk_file_indices(chunk_idx: int, file_idx: int, chunks_size: int) -> tuple[int, int]:
+    """Move to next file/chunk when size limit reached.
+
+    Args:
+        chunk_idx: Current chunk index
+        file_idx: Current file index within the chunk
+        chunks_size: Maximum number of files per chunk
+
+    Returns:
+        Tuple of (new_chunk_idx, new_file_idx)
+    """
+    if file_idx == chunks_size - 1:
+        file_idx = 0
+        chunk_idx += 1
+    else:
+        file_idx += 1
+    return chunk_idx, file_idx
+
+
+def get_file_size_in_mb(file_path: Path) -> float:
+    """Get file size on disk in megabytes.
+
+    Args:
+        file_path: Path to the file.
+
+    Returns:
+        File size in megabytes.
+    """
+    file_size_bytes = file_path.stat().st_size
+    return file_size_bytes / (1024 ** 2)
+
+
+def get_parquet_num_frames(parquet_path: str | Path) -> int:
+    """Get number of rows in a parquet file.
+
+    Args:
+        parquet_path: Path to the parquet file.
+
+    Returns:
+        Number of rows in the parquet file.
+    """
+    metadata = pq.read_metadata(parquet_path)
+    return metadata.num_rows
+
+
+def get_hf_dataset_size_in_mb(hf_ds: Dataset) -> int:
+    """Get size of HuggingFace dataset in megabytes.
+
+    Args:
+        hf_ds: HuggingFace Dataset object.
+
+    Returns:
+        Size in megabytes.
+    """
+    return hf_ds.data.nbytes // (1024 ** 2)
+
+
+def load_nested_dataset(
+    pq_dir: Path,
+    features: datasets.Features | None = None,
+    episodes: list[int] | None = None
+) -> Dataset:
+    """Load parquet files from nested chunk/file structure.
+
+    Find parquet files in provided directory {pq_dir}/chunk-xxx/file-xxx.parquet.
+    Convert parquet files to pyarrow memory mapped in a cache folder for efficient RAM usage.
+    Concatenate all pyarrow references to return HF Dataset format.
+
+    Args:
+        pq_dir: Directory containing parquet files
+        features: Optional features schema to ensure consistent loading of complex types like images
+        episodes: Optional list of episode indices to filter. Uses PyArrow predicate pushdown for efficiency.
+
+    Returns:
+        HuggingFace Dataset containing the loaded data.
+
+    Raises:
+        FileNotFoundError: If no parquet files found in directory.
+    """
+    paths = sorted(pq_dir.glob("*/*.parquet"))
+    if len(paths) == 0:
+        raise FileNotFoundError(f"Provided directory does not contain any parquet file: {pq_dir}")
+
+    # When no filtering needed, Dataset uses memory-mapped loading for efficiency
+    if episodes is None:
+        return Dataset.from_parquet([str(path) for path in paths], features=features)
+
+    # PyArrow predicate pushdown for efficient filtering
+    arrow_dataset = pa_ds.dataset(paths, format="parquet")
+    filter_expr = pa_ds.field("episode_index").isin(episodes)
+    table = arrow_dataset.to_table(filter=filter_expr)
+
+    if features is not None:
+        table = table.cast(features.arrow_schema)
+
+    return Dataset(table)
+
+
+# ============================================================================
+# v3.0 Task Functions (Parquet-based)
+# ============================================================================
+
+def write_tasks_v30(tasks: pd.DataFrame, local_dir: Path) -> None:
+    """Write tasks to parquet file (v3.0 format).
+
+    Args:
+        tasks: DataFrame with task as index and task_index as column.
+        local_dir: Root directory of the dataset.
+    """
+    path = local_dir / DEFAULT_TASKS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tasks.to_parquet(path)
+
+
+def load_tasks_v30(local_dir: Path) -> pd.DataFrame:
+    """Load tasks from parquet file (v3.0 format).
+
+    Args:
+        local_dir: Root directory of the dataset.
+
+    Returns:
+        DataFrame with task as index and task_index as column.
+    """
+    return pd.read_parquet(local_dir / DEFAULT_TASKS_PATH)
+
+
+# ============================================================================
+# v3.0 Episodes Functions (Parquet-based)
+# ============================================================================
+
+def write_episodes_v30(episodes: Dataset, local_dir: Path) -> None:
+    """Write episode metadata to parquet file (v3.0 format).
+
+    Args:
+        episodes: HuggingFace Dataset containing episode metadata.
+        local_dir: Root directory of the dataset.
+
+    Raises:
+        NotImplementedError: If episodes dataset is too large for single file.
+    """
+    episode_size_mb = get_hf_dataset_size_in_mb(episodes)
+    if episode_size_mb > DEFAULT_DATA_FILE_SIZE_IN_MB:
+        raise NotImplementedError(
+            f"Episodes dataset is too large ({episode_size_mb} MB) to write to a single file. "
+            f"The current limit is {DEFAULT_DATA_FILE_SIZE_IN_MB} MB."
+        )
+
+    fpath = local_dir / DEFAULT_EPISODES_PATH.format(chunk_index=0, file_index=0)
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    episodes.to_parquet(fpath)
+
+
+def load_episodes_v30(local_dir: Path) -> Dataset:
+    """Load episode metadata from parquet files (v3.0 format).
+
+    Args:
+        local_dir: Root directory of the dataset.
+
+    Returns:
+        HuggingFace Dataset with episode metadata (excluding stats columns).
+    """
+    episodes = load_nested_dataset(local_dir / EPISODES_DIR)
+    # Select episode features/columns containing references to episode data and videos
+    # (e.g. tasks, dataset_from_index, dataset_to_index, data/chunk_index, data/file_index, etc.)
+    # This is to speedup access to these data, instead of having to load episode stats.
+    episodes = episodes.select_columns([key for key in episodes.features if not key.startswith("stats/")])
+    return episodes
+
+
+# ============================================================================
+# Legacy v2.1 Functions (JSONL-based) - Kept for backward compatibility
+# ============================================================================
 
 # def get_nested_item(obj: DictLike, flattened_key: str, sep: str = "/") -> Any:
 #     split_keys = flattened_key.split(sep)
@@ -406,7 +605,27 @@ def create_empty_dataset_info(
     features: dict,
     use_videos: bool,
     use_audios: bool,
+    chunks_size: int = DEFAULT_CHUNK_SIZE,
+    data_files_size_in_mb: int = DEFAULT_DATA_FILE_SIZE_IN_MB,
+    video_files_size_in_mb: int = DEFAULT_VIDEO_FILE_SIZE_IN_MB,
 ) -> dict:
+    """Create empty dataset info dict for v3.0 format.
+
+    Args:
+        codebase_version: LeRobot codebase version (e.g., "v3.0")
+        dorobot_dataset_version: DoRobot dataset version (e.g., "v1.1")
+        fps: Frames per second
+        robot_type: Type of robot
+        features: Feature definitions
+        use_videos: Whether to use video format for visual data
+        use_audios: Whether to include audio recording (DoRobot custom)
+        chunks_size: Max number of files per chunk directory
+        data_files_size_in_mb: Max size per data file in MB
+        video_files_size_in_mb: Max size per video file in MB
+
+    Returns:
+        Dictionary containing dataset info in v3.0 format.
+    """
     return {
         "codebase_version": codebase_version,
         "dorobot_dataset_version": dorobot_dataset_version,
@@ -414,12 +633,14 @@ def create_empty_dataset_info(
         "total_episodes": 0,
         "total_frames": 0,
         "total_tasks": 0,
-        "total_videos": 0,
-        "total_chunks": 0,
-        "chunks_size": DEFAULT_CHUNK_SIZE,
+        # v3.0: size-based chunking instead of episode-based
+        "chunks_size": chunks_size,
+        "data_files_size_in_mb": data_files_size_in_mb,
+        "video_files_size_in_mb": video_files_size_in_mb,
         "fps": fps,
         "splits": {},
-        "data_path": DEFAULT_PARQUET_PATH,
+        # v3.0: new path patterns with chunk_index/file_index
+        "data_path": DEFAULT_DATA_PATH,
         "image_path": DEFAULT_IMAGE_PATH if use_videos == False else None,
         "video_path": DEFAULT_VIDEO_PATH if use_videos else None,
         "audio_path": DEFAULT_AUDIO_PATH if use_audios else None,

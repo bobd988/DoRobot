@@ -9,10 +9,13 @@ from typing import Callable
 import datasets
 import numpy as np
 import packaging.version
+import pandas as pd
 import PIL.Image
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import torch.utils
-from datasets import concatenate_datasets, load_dataset
+from datasets import concatenate_datasets, load_dataset, Dataset
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.errors import RevisionNotFoundError
@@ -32,8 +35,18 @@ from operating_platform.utils.dataset import (
     DEFAULT_FEATURES,
     DEFAULT_IMAGE_PATH,
     DEFAULT_AUDIO_PATH,
+    DEFAULT_DATA_PATH,
+    DEFAULT_VIDEO_PATH,
+    DEFAULT_EPISODES_PATH,
+    DEFAULT_TASKS_PATH,
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_DATA_FILE_SIZE_IN_MB,
+    DEFAULT_VIDEO_FILE_SIZE_IN_MB,
+    EPISODES_DIR,
     INFO_PATH,
-    TASKS_PATH,
+    # Legacy paths for backward compatibility
+    LEGACY_EPISODES_PATH,
+    LEGACY_TASKS_PATH,
     append_jsonlines,
     backward_compatible_episodes_stats,
     check_delta_timestamps,
@@ -41,39 +54,50 @@ from operating_platform.utils.dataset import (
     create_empty_dataset_info,
     create_lerobot_dataset_card,
     embed_images,
+    flatten_dict,
+    unflatten_dict,
     get_delta_indices,
     get_episode_data_index,
-
+    get_file_size_in_mb,
     get_hf_features_from_features,
-
     hf_transform_to_torch,
     is_valid_version,
     load_episodes,
     load_episodes_stats,
+    load_episodes_v30,
     load_info,
+    load_nested_dataset,
     load_stats,
     load_tasks,
+    load_tasks_v30,
+    update_chunk_file_indices,
     validate_episode_buffer,
     validate_frame,
     write_episode,
     write_episode_stats,
+    write_episodes_v30,
     write_info,
     write_json,
+    write_stats,
+    write_tasks_v30,
     delete_episode,
     delete_episode_stats,
     _validate_feature_names,
 )
 from operating_platform.utils.video import (
     VideoFrame,
+    concatenate_video_files,
     decode_video_frames_torchvision,
     encode_video_frames,
+    get_video_duration_in_s,
     get_video_info,
 )
 from operating_platform.robot.robots.utils import Robot
 
 
-LEROBOT_DATASET_VERSION = "v2.1"
-DOROBOT_DATASET_VERSION = "v1.0"
+# v3.0: Updated version constants
+LEROBOT_DATASET_VERSION = "v3.0"
+DOROBOT_DATASET_VERSION = "v1.1"
 
 
 class DoRobotDatasetMetadata:
@@ -83,6 +107,7 @@ class DoRobotDatasetMetadata:
         root: str | Path | None = None,
         revision: str | None = None,
         force_cache_sync: bool = False,
+        metadata_buffer_size: int = 10,
     ):
         self.repo_id = repo_id
         self.revision = revision if revision else DOROBOT_DATASET_VERSION
@@ -90,6 +115,12 @@ class DoRobotDatasetMetadata:
 
         # Thread safety: lock for metadata updates (async save compatibility)
         self._meta_lock = threading.Lock()
+
+        # v3.0: Metadata buffering for efficient writes
+        self.writer = None
+        self.latest_episode = None
+        self.metadata_buffer: list[dict] = []
+        self.metadata_buffer_size = metadata_buffer_size
 
         try:
             if force_cache_sync:
@@ -106,14 +137,28 @@ class DoRobotDatasetMetadata:
     def load_metadata(self):
         self.info = load_info(self.root)
         check_version_compatibility(self.repo_id, self._version, DOROBOT_DATASET_VERSION)
-        self.tasks, self.task_to_task_index = load_tasks(self.root)
-        self.episodes = load_episodes(self.root)
-        if self._version < packaging.version.parse("v2.1"):
+
+        # v3.0: Load from parquet format
+        if self._version >= packaging.version.parse("v3.0"):
+            self.tasks = load_tasks_v30(self.root)
+            self.task_to_task_index = {
+                task: int(self.tasks.loc[task, "task_index"])
+                for task in self.tasks.index
+            }
+            self.episodes = load_episodes_v30(self.root)
             self.stats = load_stats(self.root)
-            self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
+            # Episodes stats are embedded in episodes parquet in v3.0
+            self.episodes_stats = None
+        # v2.x: Load from JSONL format (legacy)
         else:
-            self.episodes_stats = load_episodes_stats(self.root)
-            self.stats = aggregate_stats(list(self.episodes_stats.values()))
+            self.tasks, self.task_to_task_index = load_tasks(self.root)
+            self.episodes = load_episodes(self.root)
+            if self._version < packaging.version.parse("v2.1"):
+                self.stats = load_stats(self.root)
+                self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
+            else:
+                self.episodes_stats = load_episodes_stats(self.root)
+                self.stats = aggregate_stats(list(self.episodes_stats.values()))
 
     def pull_from_repo(
         self,
@@ -135,26 +180,82 @@ class DoRobotDatasetMetadata:
         return packaging.version.parse(self.info["codebase_version"])
 
     def get_data_file_path(self, ep_index: int) -> Path:
-        ep_chunk = self.get_episode_chunk(ep_index)
-        fpath = self.data_path.format(episode_chunk=ep_chunk, episode_index=ep_index)
+        """Get data file path for an episode.
+
+        v3.0: Uses chunk_index/file_index from episode metadata.
+        v2.x: Uses episode-based chunking.
+        """
+        if self._version >= packaging.version.parse("v3.0"):
+            # v3.0: Use chunk/file indices from episode metadata
+            if isinstance(self.episodes, Dataset):
+                ep = self.episodes[ep_index]
+                chunk_idx = ep["data/chunk_index"]
+                file_idx = ep["data/file_index"]
+            else:
+                # Fallback for dict-based episodes
+                ep = self.episodes[ep_index]
+                chunk_idx = ep.get("data/chunk_index", 0)
+                file_idx = ep.get("data/file_index", 0)
+            fpath = self.data_path.format(chunk_index=chunk_idx, file_index=file_idx)
+        else:
+            # v2.x: Episode-based chunking
+            ep_chunk = self.get_episode_chunk(ep_index)
+            fpath = self.data_path.format(episode_chunk=ep_chunk, episode_index=ep_index)
         return Path(fpath)
-    
-    def get_image_file_path(self, ep_index: int, img_key: str, frame_index) -> Path:
-        # ep_chunk = self.get_episode_chunk(ep_index)
+
+    def get_image_file_path(self, ep_index: int, img_key: str, frame_index: int) -> Path:
+        """Get image file path for a frame."""
         fpath = self.image_path.format(image_key=img_key, episode_index=ep_index, frame_index=frame_index)
         return Path(fpath)
 
     def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
-        ep_chunk = self.get_episode_chunk(ep_index)
-        fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
+        """Get video file path for an episode.
+
+        v3.0: Uses chunk_index/file_index from episode metadata.
+        v2.x: Uses episode-based chunking.
+        """
+        if self._version >= packaging.version.parse("v3.0"):
+            # v3.0: Use chunk/file indices from episode metadata
+            if isinstance(self.episodes, Dataset):
+                ep = self.episodes[ep_index]
+                chunk_idx = ep[f"videos/{vid_key}/chunk_index"]
+                file_idx = ep[f"videos/{vid_key}/file_index"]
+            else:
+                ep = self.episodes[ep_index]
+                chunk_idx = ep.get(f"videos/{vid_key}/chunk_index", 0)
+                file_idx = ep.get(f"videos/{vid_key}/file_index", 0)
+            fpath = self.video_path.format(video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx)
+        else:
+            # v2.x: Episode-based chunking
+            ep_chunk = self.get_episode_chunk(ep_index)
+            fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
         return Path(fpath)
-    
+
     def get_audio_file_path(self, ep_index: int, aud_key: str) -> Path:
-        ep_chunk = self.get_episode_chunk(ep_index)
-        fpath = self.audio_path.format(episode_chunk=ep_chunk, audio_key=aud_key, episode_index=ep_index)
+        """Get audio file path for an episode.
+
+        v3.0: Uses chunk_index/file_index from episode metadata (DoRobot custom).
+        v2.x: Uses episode-based chunking.
+        """
+        if self._version >= packaging.version.parse("v3.0"):
+            # v3.0: Use chunk/file indices from episode metadata
+            if isinstance(self.episodes, Dataset):
+                ep = self.episodes[ep_index]
+                chunk_idx = ep.get(f"audio/{aud_key}/chunk_index", 0)
+                file_idx = ep.get(f"audio/{aud_key}/file_index", 0)
+            else:
+                ep = self.episodes[ep_index]
+                chunk_idx = ep.get(f"audio/{aud_key}/chunk_index", 0)
+                file_idx = ep.get(f"audio/{aud_key}/file_index", 0)
+            fpath = self.audio_path.format(audio_key=aud_key, chunk_index=chunk_idx, file_index=file_idx)
+        else:
+            # v2.x: Episode-based chunking
+            ep_chunk = self.get_episode_chunk(ep_index)
+            fpath = self.audio_path.format(episode_chunk=ep_chunk, audio_key=aud_key, episode_index=ep_index)
         return Path(fpath)
 
     def get_episode_chunk(self, ep_index: int) -> int:
+        """Get chunk index for legacy v2.x format."""
         return ep_index // self.chunks_size
 
     @property
@@ -239,13 +340,26 @@ class DoRobotDatasetMetadata:
 
     @property
     def total_chunks(self) -> int:
-        """Total number of chunks (groups of episodes)."""
-        return self.info["total_chunks"]
+        """Total number of chunks (groups of episodes).
+
+        Note: In v3.0, this is computed dynamically from episodes.
+        """
+        return self.info.get("total_chunks", 0)
 
     @property
     def chunks_size(self) -> int:
-        """Max number of episodes per chunk."""
-        return self.info["chunks_size"]
+        """Max number of files per chunk directory (v3.0) or episodes per chunk (v2.x)."""
+        return self.info.get("chunks_size", DEFAULT_CHUNK_SIZE)
+
+    @property
+    def data_files_size_in_mb(self) -> int:
+        """Max size per data file in MB (v3.0 only)."""
+        return self.info.get("data_files_size_in_mb", DEFAULT_DATA_FILE_SIZE_IN_MB)
+
+    @property
+    def video_files_size_in_mb(self) -> int:
+        """Max size per video file in MB (v3.0 only)."""
+        return self.info.get("video_files_size_in_mb", DEFAULT_VIDEO_FILE_SIZE_IN_MB)
 
     def get_task_index(self, task: str) -> int | None:
         """
@@ -265,14 +379,24 @@ class DoRobotDatasetMetadata:
 
             task_index = self.info["total_tasks"]
             self.task_to_task_index[task] = task_index
-            self.tasks[task_index] = task
-            self.info["total_tasks"] += 1
 
-            task_dict = {
-                "task_index": task_index,
-                "task": task,
-            }
-            append_jsonlines(task_dict, self.root / TASKS_PATH)
+            # v3.0: Store tasks in DataFrame and write to parquet
+            if self._version >= packaging.version.parse("v3.0"):
+                if self.tasks is None or len(self.tasks) == 0:
+                    self.tasks = pd.DataFrame({"task_index": [task_index]}, index=[task])
+                else:
+                    self.tasks.loc[task] = task_index
+                write_tasks_v30(self.tasks, self.root)
+            # v2.x: Store tasks in dict and write to JSONL
+            else:
+                self.tasks[task_index] = task
+                task_dict = {
+                    "task_index": task_index,
+                    "task": task,
+                }
+                append_jsonlines(task_dict, self.root / LEGACY_TASKS_PATH)
+
+            self.info["total_tasks"] += 1
 
     def save_episode(
         self,
@@ -280,6 +404,7 @@ class DoRobotDatasetMetadata:
         episode_length: int,
         episode_tasks: list[str],
         episode_stats: dict[str, dict],
+        episode_metadata: dict | None = None,
         skip_encoding: bool = False,
     ) -> None:
         """
@@ -291,36 +416,128 @@ class DoRobotDatasetMetadata:
             episode_length: Number of frames in this episode
             episode_tasks: List of task descriptions for this episode
             episode_stats: Statistics for this episode
+            episode_metadata: v3.0 chunk/file indices and timestamps (optional)
             skip_encoding: If True, skip video info update (cloud offload mode)
         """
         with self._meta_lock:
             self.info["total_episodes"] += 1
             self.info["total_frames"] += episode_length
-
-            chunk = self.get_episode_chunk(episode_index)
-            if chunk >= self.total_chunks:
-                self.info["total_chunks"] += 1
-
             self.info["splits"] = {"train": f"0:{self.info['total_episodes']}"}
-            # Only count videos and update video info if encoding was done
-            if not skip_encoding:
-                self.info["total_videos"] += len(self.video_keys)
-                if len(self.video_keys) > 0:
-                    self.update_video_info()
+
+            # v3.0: Use metadata buffering with parquet format
+            if self._version >= packaging.version.parse("v3.0"):
+                # Build episode dict with v3.0 structure
+                episode_dict = {
+                    "episode_index": episode_index,
+                    "tasks": episode_tasks,
+                    "length": episode_length,
+                }
+                # Add chunk/file indices if provided
+                if episode_metadata:
+                    episode_dict.update(episode_metadata)
+                # Flatten and add stats
+                episode_dict.update(flatten_dict({"stats": episode_stats}))
+
+                # Add to metadata buffer
+                self._save_episode_metadata(episode_dict)
+
+                # Update global stats
+                self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats else episode_stats
+                write_stats(self.stats, self.root)
+
+            # v2.x: Legacy JSONL format
+            else:
+                chunk = self.get_episode_chunk(episode_index)
+                if chunk >= self.total_chunks:
+                    self.info["total_chunks"] += 1
+
+                if not skip_encoding:
+                    self.info["total_videos"] += len(self.video_keys)
+
+                episode_dict = {
+                    "episode_index": episode_index,
+                    "tasks": episode_tasks,
+                    "length": episode_length,
+                }
+                self.episodes[episode_index] = episode_dict
+                write_episode(episode_dict, self.root)
+
+                self.episodes_stats[episode_index] = episode_stats
+                self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats else episode_stats
+                write_episode_stats(episode_index, episode_stats, self.root)
+
+            # Update video info if encoding was done
+            if not skip_encoding and len(self.video_keys) > 0:
+                self.update_video_info()
 
             write_info(self.info, self.root)
 
-            episode_dict = {
-                "episode_index": episode_index,
-                "tasks": episode_tasks,
-                "length": episode_length,
-            }
-            self.episodes[episode_index] = episode_dict
-            write_episode(episode_dict, self.root)
+    def _save_episode_metadata(self, episode_dict: dict) -> None:
+        """Save episode metadata using v3.0 buffering system.
 
-            self.episodes_stats[episode_index] = episode_stats
-            self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats else episode_stats
-            write_episode_stats(episode_index, episode_stats, self.root)
+        Adds episode to buffer and flushes when buffer is full.
+        """
+        # Wrap values in lists for DataFrame/parquet compatibility
+        wrapped_dict = {}
+        for key, value in episode_dict.items():
+            if isinstance(value, (list, np.ndarray)):
+                wrapped_dict[key] = [value]
+            else:
+                wrapped_dict[key] = [value]
+
+        self.metadata_buffer.append(wrapped_dict)
+        self.latest_episode = wrapped_dict
+
+        if len(self.metadata_buffer) >= self.metadata_buffer_size:
+            self._flush_metadata_buffer()
+
+    def _flush_metadata_buffer(self) -> None:
+        """Write buffered episode metadata to parquet."""
+        if len(self.metadata_buffer) == 0:
+            return
+
+        # Combine all buffered episodes
+        combined_dict = {}
+        for episode_dict in self.metadata_buffer:
+            for key, value in episode_dict.items():
+                if key not in combined_dict:
+                    combined_dict[key] = []
+                # Unwrap single-element lists
+                val = value[0] if isinstance(value, list) and len(value) == 1 else value
+                if isinstance(val, np.ndarray):
+                    combined_dict[key].append(val.tolist())
+                else:
+                    combined_dict[key].append(val)
+
+        # Determine chunk/file indices for metadata file
+        first_ep = self.metadata_buffer[0]
+        chunk_idx = first_ep.get("meta/episodes/chunk_index", [0])[0] if "meta/episodes/chunk_index" in first_ep else 0
+        file_idx = first_ep.get("meta/episodes/file_index", [0])[0] if "meta/episodes/file_index" in first_ep else 0
+
+        # Write to parquet
+        fpath = self.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        table = pa.Table.from_pydict(combined_dict)
+        if not self.writer:
+            self.writer = pq.ParquetWriter(fpath, schema=table.schema, compression="snappy")
+
+        self.writer.write_table(table)
+        self.metadata_buffer.clear()
+
+    def _close_writer(self) -> None:
+        """Close parquet writer and flush remaining buffer."""
+        self._flush_metadata_buffer()
+        if self.writer:
+            self.writer.close()
+            self.writer = None
+
+    def __del__(self):
+        """Cleanup on destruction."""
+        try:
+            self._close_writer()
+        except Exception:
+            pass  # Ignore errors during cleanup
 
     def remove_episode(self, ep_index: int) -> None:
     #     episode_tasks: list[str],

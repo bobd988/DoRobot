@@ -708,3 +708,94 @@ def get_image_pixel_channels(image: Image):
         return 4  # RGBA
     else:
         raise ValueError("Unknown format")
+
+
+# =============================================================================
+# v3.0 Video Utilities
+# =============================================================================
+
+def concatenate_video_files(input_paths: list[Path], output_path: Path) -> None:
+    """Concatenate multiple video files using ffmpeg concat demuxer.
+
+    This is used in v3.0 for size-based video file chunking, where multiple
+    episodes may be concatenated into a single video file.
+
+    Args:
+        input_paths: List of paths to video files to concatenate
+        output_path: Path where the concatenated video will be saved
+
+    Raises:
+        subprocess.CalledProcessError: If ffmpeg fails
+    """
+    import tempfile
+    import shutil
+
+    if len(input_paths) == 0:
+        raise ValueError("No input paths provided")
+
+    if len(input_paths) == 1:
+        # Just copy the file if only one input
+        shutil.copy(str(input_paths[0]), str(output_path))
+        return
+
+    # Create concat file for ffmpeg
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        for path in input_paths:
+            # Escape single quotes in paths
+            escaped_path = str(path).replace("'", "'\\''")
+            f.write(f"file '{escaped_path}'\n")
+        concat_file = f.name
+
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_output = output_path.with_suffix('.tmp.mp4')
+
+        cmd = [
+            'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+            '-i', concat_file, '-c', 'copy', str(temp_output)
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error(f"ffmpeg concat failed: {result.stderr}")
+            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+
+        shutil.move(str(temp_output), str(output_path))
+        logging.debug(f"Concatenated {len(input_paths)} videos to {output_path}")
+
+    finally:
+        # Clean up concat file
+        Path(concat_file).unlink(missing_ok=True)
+
+
+def get_video_duration_in_s(video_path: Path) -> float:
+    """Get video duration in seconds using ffprobe.
+
+    Args:
+        video_path: Path to the video file
+
+    Returns:
+        Duration of the video in seconds
+
+    Raises:
+        subprocess.CalledProcessError: If ffprobe fails
+        ValueError: If duration cannot be parsed
+    """
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        str(video_path)
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logging.error(f"ffprobe failed: {result.stderr}")
+        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError as e:
+        raise ValueError(f"Could not parse duration from ffprobe output: {result.stdout}") from e
+
+    return duration

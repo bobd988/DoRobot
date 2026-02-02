@@ -33,6 +33,25 @@ If you encounter a problem, contact LeRobot maintainers on [Discord](https://dis
 or open an [issue on GitHub](https://github.com/huggingface/lerobot/issues/new/choose).
 """
 
+V30_MESSAGE = """
+The dataset you requested ({repo_id}) is in {version} format.
+
+LeRobot v3.0 introduced a new format with significant changes:
+- Metadata stored in Parquet instead of JSONL
+- Size-based file chunking instead of episode-based
+- Video path structure changed to videos/{{camera}}/chunk-XXX/file-YYY.mp4
+- Quantile statistics support (q01, q10, q50, q90, q99)
+
+Please convert your dataset using:
+```
+python -m operating_platform.dataset.v30.convert_dataset_v21_to_v30 \\
+    --repo-id={repo_id} \\
+    --root=/path/to/dataset
+```
+
+This is a one-time migration that will update your dataset to v3.0 format.
+"""
+
 FUTURE_MESSAGE = """
 The dataset you requested ({repo_id}) is only available in {version} format.
 As we cannot ensure forward compatibility with it, please update your current version of lerobot.
@@ -44,7 +63,13 @@ class CompatibilityError(Exception): ...
 
 class BackwardCompatibilityError(CompatibilityError):
     def __init__(self, repo_id: str, version: packaging.version.Version):
-        message = V2_MESSAGE.format(repo_id=repo_id, version=version)
+        # Select appropriate message based on version
+        if version.major < 2:
+            message = V2_MESSAGE.format(repo_id=repo_id, version=version)
+        elif version < packaging.version.parse("v3.0"):
+            message = V30_MESSAGE.format(repo_id=repo_id, version=version)
+        else:
+            message = V2_MESSAGE.format(repo_id=repo_id, version=version)
         super().__init__(message)
 
 
