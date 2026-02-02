@@ -138,6 +138,7 @@ def convert_data(
         # Load legacy episode data
         legacy_ep_chunk = ep_index // info.get("chunks_size", 10000)
         legacy_path = root / legacy_data_path.format(
+            chunk_index=legacy_ep_chunk,
             episode_chunk=legacy_ep_chunk,
             episode_index=ep_index
         )
@@ -425,9 +426,14 @@ def convert_episodes_metadata(
     for ep in episodes:
         ep_index = ep["episode_index"]
 
+        # Handle both v2.1 formats: "task_index" (single task) or "tasks" (multi-task)
+        tasks = ep.get("tasks", [ep.get("task_index", 0)])
+        if isinstance(tasks, int):
+            tasks = [tasks]
+
         record = {
             "episode_index": ep_index,
-            "tasks": ep["tasks"],
+            "tasks": tasks,
             "length": ep["length"],
         }
 
@@ -531,6 +537,8 @@ def convert_dataset(
         in_place: If True, convert in place (backup original)
     """
     root = Path(root)
+    if output_root is not None:
+        output_root = Path(output_root)
 
     if not root.exists():
         raise FileNotFoundError(f"Dataset not found at {root}")

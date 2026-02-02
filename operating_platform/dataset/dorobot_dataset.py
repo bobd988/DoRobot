@@ -1607,7 +1607,7 @@ class DoRobotDataset(torch.utils.data.Dataset):
 
         if image_writer_processes or image_writer_threads:
             obj.start_image_writer(image_writer_processes, image_writer_threads)
-        if len(robot.microphones) > 0:
+        if robot is not None and len(robot.microphones) > 0:
             obj.start_audio_writer(robot.microphones)
 
         # TODO(aliberts, rcadene, alexander-soare): Merge this with OnlineBuffer/DataBuffer
