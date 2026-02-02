@@ -4,6 +4,71 @@ This document tracks all changes made to the DoRobot data collection system.
 
 ---
 
+## v0.3.0 (2026-02-02) - LeRobot v3.0 Dataset Format Support
+
+### Summary
+Major upgrade to support LeRobot v3.0 dataset format with Parquet-based metadata,
+size-based file chunking, and quantile statistics. Full backward compatibility
+with v2.1 datasets through conversion script.
+
+### Breaking Changes
+- Dataset format version bumped to v3.0
+- New path structure for videos: `videos/{camera}/chunk-XXX/file-YYY.mp4`
+- Metadata now stored in Parquet instead of JSONL
+
+### New Features
+
+**v3.0 Dataset Format:**
+- Parquet-based metadata (tasks, episodes) for better I/O performance
+- Size-based file chunking (100MB data, 200MB video per file)
+- Quantile statistics support (q01, q10, q50, q90, q99)
+- Metadata buffering for efficient writes during recording
+
+**Quantile Statistics (`compute_stats.py`):**
+- New `RunningQuantileStats` class for incremental quantile computation
+- Histogram-based approximation with adaptive bin ranges
+- Default quantiles: 1%, 10%, 50%, 90%, 99%
+
+**Conversion Script (`v30/convert_dataset_v21_to_v30.py`):**
+- Full migration tool for v2.1 to v3.0 conversion
+- Handles data, video, audio (DoRobot custom), and metadata
+- Size-based file chunking for large datasets
+- Preserves all DoRobot custom features
+
+### Preserved Custom Features
+- Audio recording support (DoRobot custom)
+- Thread-safe metadata (`_meta_lock`)
+- Async episode saving compatibility
+- NPU video encoding
+
+### Version Updates
+- `LEROBOT_DATASET_VERSION`: v2.1 → v3.0
+- `DOROBOT_DATASET_VERSION`: v1.0 → v1.1
+
+### Usage
+
+**Convert existing v2.1 dataset:**
+```bash
+python -m operating_platform.dataset.v30.convert_dataset_v21_to_v30 \
+    --repo-id=my-dataset \
+    --root=/path/to/v21/dataset
+```
+
+**New datasets automatically use v3.0 format.**
+
+### Files Added
+- `operating_platform/dataset/v30/__init__.py`
+- `operating_platform/dataset/v30/convert_dataset_v21_to_v30.py`
+
+### Files Modified
+- `operating_platform/utils/dataset.py` - v3.0 constants, helpers
+- `operating_platform/dataset/compute_stats.py` - Quantile support
+- `operating_platform/utils/video.py` - Video concatenation
+- `operating_platform/dataset/dorobot_dataset.py` - Metadata buffering
+- `operating_platform/dataset/backward_compatibility.py` - v3.0 message
+
+---
+
 ## v0.2.141 (2026-01-28) - Distributed Teleoperation via Zenoh
 
 ### Summary
