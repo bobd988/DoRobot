@@ -179,23 +179,37 @@ class DoRobotDatasetMetadata:
         """Codebase version used to create this dataset."""
         return packaging.version.parse(self.info["codebase_version"])
 
-    def get_data_file_path(self, ep_index: int) -> Path:
+    def get_data_file_path(self, ep_index: int, chunk_index: int = None, file_index: int = None) -> Path:
         """Get data file path for an episode.
 
-        v3.0: Uses chunk_index/file_index from episode metadata.
+        v3.0: Uses chunk_index/file_index from episode metadata or provided values.
         v2.x: Uses episode-based chunking.
+
+        Args:
+            ep_index: Episode index
+            chunk_index: Override chunk index (for new episodes not yet in metadata)
+            file_index: Override file index (for new episodes not yet in metadata)
         """
         if self._version >= packaging.version.parse("v3.0"):
-            # v3.0: Use chunk/file indices from episode metadata
-            if isinstance(self.episodes, Dataset):
-                ep = self.episodes[ep_index]
-                chunk_idx = ep["data/chunk_index"]
-                file_idx = ep["data/file_index"]
+            # v3.0: Use provided indices or look up from episode metadata
+            if chunk_index is not None and file_index is not None:
+                # Use provided indices (for new episodes)
+                chunk_idx, file_idx = chunk_index, file_index
+            elif self.episodes is not None and ep_index < len(self.episodes):
+                # Look up from existing episode metadata
+                if isinstance(self.episodes, Dataset):
+                    ep = self.episodes[ep_index]
+                    chunk_idx = ep["data/chunk_index"]
+                    file_idx = ep["data/file_index"]
+                else:
+                    ep = self.episodes[ep_index]
+                    chunk_idx = ep.get("data/chunk_index", 0)
+                    file_idx = ep.get("data/file_index", 0)
             else:
-                # Fallback for dict-based episodes
-                ep = self.episodes[ep_index]
-                chunk_idx = ep.get("data/chunk_index", 0)
-                file_idx = ep.get("data/file_index", 0)
+                # New episode: use sequential file index, all in chunk 0 for now
+                # Size-based chunking is handled during consolidation
+                chunk_idx = 0
+                file_idx = ep_index
             fpath = self.data_path.format(chunk_index=chunk_idx, file_index=file_idx)
         else:
             # v2.x: Episode-based chunking
@@ -208,22 +222,35 @@ class DoRobotDatasetMetadata:
         fpath = self.image_path.format(image_key=img_key, episode_index=ep_index, frame_index=frame_index)
         return Path(fpath)
 
-    def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
+    def get_video_file_path(self, ep_index: int, vid_key: str, chunk_index: int = None, file_index: int = None) -> Path:
         """Get video file path for an episode.
 
-        v3.0: Uses chunk_index/file_index from episode metadata.
+        v3.0: Uses chunk_index/file_index from episode metadata or provided values.
         v2.x: Uses episode-based chunking.
+
+        Args:
+            ep_index: Episode index
+            vid_key: Video key (e.g., "image_top")
+            chunk_index: Override chunk index (for new episodes)
+            file_index: Override file index (for new episodes)
         """
         if self._version >= packaging.version.parse("v3.0"):
-            # v3.0: Use chunk/file indices from episode metadata
-            if isinstance(self.episodes, Dataset):
-                ep = self.episodes[ep_index]
-                chunk_idx = ep[f"videos/{vid_key}/chunk_index"]
-                file_idx = ep[f"videos/{vid_key}/file_index"]
+            # v3.0: Use provided indices or look up from episode metadata
+            if chunk_index is not None and file_index is not None:
+                chunk_idx, file_idx = chunk_index, file_index
+            elif self.episodes is not None and ep_index < len(self.episodes):
+                if isinstance(self.episodes, Dataset):
+                    ep = self.episodes[ep_index]
+                    chunk_idx = ep.get(f"videos/{vid_key}/chunk_index", 0)
+                    file_idx = ep.get(f"videos/{vid_key}/file_index", ep_index)
+                else:
+                    ep = self.episodes[ep_index]
+                    chunk_idx = ep.get(f"videos/{vid_key}/chunk_index", 0)
+                    file_idx = ep.get(f"videos/{vid_key}/file_index", ep_index)
             else:
-                ep = self.episodes[ep_index]
-                chunk_idx = ep.get(f"videos/{vid_key}/chunk_index", 0)
-                file_idx = ep.get(f"videos/{vid_key}/file_index", 0)
+                # New episode: use sequential file index
+                chunk_idx = 0
+                file_idx = ep_index
             fpath = self.video_path.format(video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx)
         else:
             # v2.x: Episode-based chunking
@@ -231,22 +258,35 @@ class DoRobotDatasetMetadata:
             fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
         return Path(fpath)
 
-    def get_audio_file_path(self, ep_index: int, aud_key: str) -> Path:
+    def get_audio_file_path(self, ep_index: int, aud_key: str, chunk_index: int = None, file_index: int = None) -> Path:
         """Get audio file path for an episode.
 
         v3.0: Uses chunk_index/file_index from episode metadata (DoRobot custom).
         v2.x: Uses episode-based chunking.
+
+        Args:
+            ep_index: Episode index
+            aud_key: Audio key (e.g., "mic0")
+            chunk_index: Override chunk index (for new episodes)
+            file_index: Override file index (for new episodes)
         """
         if self._version >= packaging.version.parse("v3.0"):
-            # v3.0: Use chunk/file indices from episode metadata
-            if isinstance(self.episodes, Dataset):
-                ep = self.episodes[ep_index]
-                chunk_idx = ep.get(f"audio/{aud_key}/chunk_index", 0)
-                file_idx = ep.get(f"audio/{aud_key}/file_index", 0)
+            # v3.0: Use provided indices or look up from episode metadata
+            if chunk_index is not None and file_index is not None:
+                chunk_idx, file_idx = chunk_index, file_index
+            elif self.episodes is not None and ep_index < len(self.episodes):
+                if isinstance(self.episodes, Dataset):
+                    ep = self.episodes[ep_index]
+                    chunk_idx = ep.get(f"audio/{aud_key}/chunk_index", 0)
+                    file_idx = ep.get(f"audio/{aud_key}/file_index", ep_index)
+                else:
+                    ep = self.episodes[ep_index]
+                    chunk_idx = ep.get(f"audio/{aud_key}/chunk_index", 0)
+                    file_idx = ep.get(f"audio/{aud_key}/file_index", ep_index)
             else:
-                ep = self.episodes[ep_index]
-                chunk_idx = ep.get(f"audio/{aud_key}/chunk_index", 0)
-                file_idx = ep.get(f"audio/{aud_key}/file_index", 0)
+                # New episode: use sequential file index
+                chunk_idx = 0
+                file_idx = ep_index
             fpath = self.audio_path.format(audio_key=aud_key, chunk_index=chunk_idx, file_index=file_idx)
         else:
             # v2.x: Episode-based chunking
@@ -441,6 +481,9 @@ class DoRobotDatasetMetadata:
                 # Add to metadata buffer
                 self._save_episode_metadata(episode_dict)
 
+                # Update in-memory episodes dict for immediate access
+                self.episodes[episode_index] = episode_dict
+
                 # Update global stats
                 self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats else episode_stats
                 write_stats(self.stats, self.root)
@@ -609,6 +652,12 @@ class DoRobotDatasetMetadata:
 
         # Thread safety: lock for metadata updates (async save compatibility)
         obj._meta_lock = threading.Lock()
+
+        # v3.0: Metadata buffering for efficient writes
+        obj.writer = None
+        obj.latest_episode = None
+        obj.metadata_buffer = []
+        obj.metadata_buffer_size = 10
 
         obj.root.mkdir(parents=True, exist_ok=True)
 
@@ -1190,25 +1239,58 @@ class DoRobotDataset(torch.utils.data.Dataset):
         else:
             episode_buffer = self.episode_buffer
 
+        # size and task are special cases that won't be added to hf_dataset
+        # Check if they exist (may have been removed by a previous failed attempt)
+        episode_length = episode_buffer.get("size")
+        tasks = episode_buffer.get("task")
+
+        # If size/task are missing, this is a retry - try to recover from data
+        if episode_length is None:
+            # Try to infer size from observation.state or action length
+            for key in self.features:
+                if key in episode_buffer and isinstance(episode_buffer[key], (list, np.ndarray)):
+                    episode_length = len(episode_buffer[key])
+                    break
+            if episode_length is None:
+                raise ValueError("Cannot determine episode length - size key missing and no data arrays found")
+
+        # Check if this is a retry (task_index already exists as array)
+        is_retry = "task_index" in episode_buffer and isinstance(episode_buffer.get("task_index"), np.ndarray)
+
+        if tasks is None:
+            tasks = []  # Default to empty task list for retry
+
         validate_episode_buffer(episode_buffer, self.meta.total_episodes, self.features)
 
-        # size and task are special cases that won't be added to hf_dataset
-        episode_length = episode_buffer.pop("size")
-        tasks = episode_buffer.pop("task")
-        episode_tasks = list(set(tasks))
-        episode_index = episode_buffer["episode_index"]
+        # Remove size/task from buffer to avoid including in dataset
+        episode_buffer.pop("size", None)
+        episode_buffer.pop("task", None)
+        episode_tasks = list(set(tasks)) if tasks else []
 
-        episode_buffer["index"] = np.arange(self.meta.total_frames, self.meta.total_frames + episode_length)
-        episode_buffer["episode_index"] = np.full((episode_length,), episode_index)
+        # Get scalar episode_index (may already be an array from a failed retry)
+        ep_idx_raw = episode_buffer["episode_index"]
+        if isinstance(ep_idx_raw, np.ndarray):
+            episode_index = int(ep_idx_raw[0]) if len(ep_idx_raw) > 0 else 0
+        else:
+            episode_index = int(ep_idx_raw)
 
-        # Add new tasks to the tasks dictionary
-        for task in episode_tasks:
-            task_index = self.meta.get_task_index(task)
-            if task_index is None:
-                self.meta.add_task(task)
+        # Only update index/episode_index/task_index if not already set (first attempt)
+        if not is_retry or not isinstance(episode_buffer.get("index"), np.ndarray):
+            episode_buffer["index"] = np.arange(self.meta.total_frames, self.meta.total_frames + episode_length)
+            episode_buffer["episode_index"] = np.full((episode_length,), episode_index)
 
-        # Given tasks in natural language, find their corresponding task indices
-        episode_buffer["task_index"] = np.array([self.meta.get_task_index(task) for task in tasks])
+            # Add new tasks to the tasks dictionary
+            for task in episode_tasks:
+                task_index = self.meta.get_task_index(task)
+                if task_index is None:
+                    self.meta.add_task(task)
+
+            # Given tasks in natural language, find their corresponding task indices
+            if tasks:
+                episode_buffer["task_index"] = np.array([self.meta.get_task_index(task) for task in tasks])
+            else:
+                # For retry with empty tasks, use default task index 0
+                episode_buffer["task_index"] = np.zeros(episode_length, dtype=np.int64)
 
         for key, ft in self.features.items():
             # index, episode_index, task_index are already processed above, and image and video
@@ -1268,8 +1350,8 @@ class DoRobotDataset(torch.utils.data.Dataset):
                     raise RuntimeError(f"Failed to create video file for episode {episode_index}: {episode_video}")
 
         # delete images for THIS episode only (not the entire images/ folder!)
-        # Image path format: images/{image_key}/episode_{episode_index:06d}/frame_{frame_index:06d}.png
-        # We want to delete episode_XXXXXX/ directory, which is .parent of the frame file
+        # Image path format: images/{image_key}/episode-{episode_index:06d}/frame-{frame_index:06d}.png
+        # We want to delete episode-XXXXXX/ directory, which is .parent of the frame file
         # NOTE: In cloud offload mode (skip_encoding=True), we keep the images for cloud-side encoding
         if len(self.meta.video_keys) > 0 and not skip_encoding:
             for key in self.meta.video_keys:
