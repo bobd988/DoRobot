@@ -118,6 +118,12 @@ def main() -> None:
             enable = bool(lc.get("gripActive", False))
             gripper = float(lc.get("trigger", 0.0))
             frame = "world"
+            # DEBUG: Print first 5 VR events to see grip status
+            if not hasattr(main, '_vr_count'):
+                main._vr_count = 0
+            main._vr_count += 1
+            if main._vr_count <= 5:
+                print(f"[command_mux] DEBUG VR #{main._vr_count}: gripActive={lc.get('gripActive')}, trigger={gripper:.2f}, pos={pos}", flush=True)
         else:
             continue
 
@@ -136,7 +142,7 @@ def main() -> None:
         # ---- PRINT POLICY: only on state change (and optional heartbeat) ----
         changed = False
         if last_enable is None or enable != last_enable:
-            print(f"[command_mux] enable changed: {last_enable} -> {enable}", flush=True)
+            print(f"[command_mux] enable changed: {last_enable} -> {enable} (gripActive={lc.get('gripActive') if 'lc' in locals() else 'N/A'})", flush=True)
             last_enable = enable
             changed = True
 

@@ -689,5 +689,89 @@ class PiperV1RobotConfig(ManipulatorRobotConfig):
     use_videos: bool = True
 
 
+@RobotConfig.register_subclass("vr_x5")
+@dataclass
+class VRX5RobotConfig(RobotConfig):
+    """
+    VR X5 Robot Configuration
+    - VR hand controller as leader (via WebSocket)
+    - ARX-X5 arm as follower (via CAN bus)
+    - Data collected through DORA dataflow and ZeroMQ
+    """
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "camera_orbbec": OpenCVCameraConfig(
+                camera_index=4,  # /dev/video4 (Orbbec Dabai DC1)
+                fps=30,
+                width=640,
+                height=480,
+            ),
+        }
+    )
+
+    use_videos: bool = True
+
+    # VR and X5 are managed by DORA nodes, not by lerobot motors
+    # So we don't need leader_arms or follower_arms configuration
+
+
+@RobotConfig.register_subclass("leader_x5")
+@dataclass
+class LeaderX5RobotConfig(ManipulatorRobotConfig):
+    """
+    Leader X5 Robot Configuration
+    - Feetech STS3215 leader arm (7 servos: 6 joints + 1 gripper)
+    - ARX-X5 follower arm (controlled via CAN bus)
+    - For traditional leader-follower teleoperation
+    """
+
+    leader_arms: dict[str, MotorsBusConfig] = field(
+        default_factory=lambda: {
+            "main": FeetechMotorsBusConfig(
+                port="/dev/ttyACM0",  # Feetech leader arm (QinHeng Electronics)
+                motors={
+                    # name: (index, model)
+                    "joint_0": [1, "sts3215"],
+                    "joint_1": [2, "sts3215"],
+                    "joint_2": [3, "sts3215"],
+                    "joint_3": [4, "sts3215"],
+                    "joint_4": [5, "sts3215"],
+                    "joint_5": [6, "sts3215"],
+                    "gripper": [7, "sts3215"],
+                },
+            ),
+        }
+    )
+
+    # Note: X5 follower arm is controlled via DORA nodes and CAN bus
+    # Not through the lerobot motor bus system
+    # follower_arms configuration would need X5 SDK integration
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "top": IntelRealSenseCameraConfig(
+                serial_number="406122070147",  # RealSense D435I (top view)
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            "wrist": IntelRealSenseCameraConfig(
+                serial_number="347622073355",  # RealSense D435I (wrist view)
+                fps=30,
+                width=640,
+                height=480,
+            ),
+            "right_realsense": IntelRealSenseCameraConfig(
+                serial_number="346522074669",  # RealSense D435I (right view)
+                fps=30,
+                width=640,
+                height=480,
+            ),
+        }
+    )
+
+    use_videos: bool = True
+
 
 

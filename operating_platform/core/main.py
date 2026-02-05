@@ -18,6 +18,53 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from pprint import pformat
+
+# File-based command system for headless mode
+# User creates files in /tmp to send commands
+_command_files = {
+    's': '/tmp/dorobot_save',
+    'e': '/tmp/dorobot_exit',
+    'n': '/tmp/dorobot_next',
+}
+
+def start_keyboard_listener():
+    """Initialize file-based command system"""
+    # Clean up any existing command files
+    for cmd_file in _command_files.values():
+        try:
+            if os.path.exists(cmd_file):
+                os.remove(cmd_file)
+        except:
+            pass
+
+    logging.info("[Command] File-based command system initialized")
+    logging.info("[Command] Create these files to send commands:")
+    logging.info(f"[Command]   touch {_command_files['s']} - Save episode")
+    logging.info(f"[Command]   touch {_command_files['n']} - Next episode")
+    logging.info(f"[Command]   touch {_command_files['e']} - Exit")
+
+def stop_keyboard_listener():
+    """Clean up command files"""
+    for cmd_file in _command_files.values():
+        try:
+            if os.path.exists(cmd_file):
+                os.remove(cmd_file)
+        except:
+            pass
+
+def get_keyboard_input():
+    """Check for command files and return corresponding key code"""
+    for key, cmd_file in _command_files.items():
+        if os.path.exists(cmd_file):
+            try:
+                # Remove the file immediately to avoid repeated triggers
+                os.remove(cmd_file)
+                key_code = ord(key)
+                print(f"\n[Command] File command received: '{key}' (code: {key_code})\n", flush=True)
+                return key_code
+            except:
+                pass
+    return -1
 from deepdiff import DeepDiff
 from functools import cache
 from termcolor import colored
@@ -455,6 +502,18 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
         show_labels=True
     )
 
+    # Start global keyboard listener for headless mode
+    start_keyboard_listener()
+
+    # CRITICAL: Call daemon.update() multiple times to ensure robot data is available
+    # before starting the recording thread. This populates daemon.observation and daemon.obs_action
+    # which are needed by Record.process() loop.
+    logging.info("[Setup] Warming up robot data stream...")
+    for i in range(5):
+        daemon.update()
+        time.sleep(0.1)
+    logging.info("[Setup] Robot data stream ready")
+
     # 开始记录（带倒计时）- 只做一次
     if record_cmd.get("countdown_seconds", 3) > 0:
         for i in range(record_cmd["countdown_seconds"], 0, -1):
@@ -500,8 +559,14 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
             current_episode = record.dataset.episode_buffer.get("episode_index", 0)
             if observation and not is_headless():
                 key = camera_display.show(observation, episode_index=current_episode, status="Recording")
+                # If camera display returns -1 (OpenCV GUI not available), fall back to keyboard listener
+                if key == -1:
+                    key = get_keyboard_input()
+                    time.sleep(0.01)  # Small delay to prevent busy loop
             else:
-                key = cv2.waitKey(10)
+                # In headless mode, use global keyboard listener
+                key = get_keyboard_input()
+                time.sleep(0.01)  # Small delay to prevent busy loop
 
             # Memory monitoring: check every MEMORY_CHECK_INTERVAL frames
             frame_counter += 1
@@ -554,8 +619,14 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                     if observation and not is_headless():
                         next_episode = record.dataset.episode_buffer.get("episode_index", 0)
                         key = camera_display.show(observation, episode_index=next_episode, status="Reset - Press N")
+                        # If camera display returns -1 (OpenCV GUI not available), fall back to keyboard listener
+                        if key == -1:
+                            key = get_keyboard_input()
+                            time.sleep(0.01)  # Small delay to prevent busy loop
                     else:
-                        key = cv2.waitKey(10)
+                        # In headless mode, auto-confirm reset after a short delay
+                        time.sleep(0.5)
+                        key = ord('n')  # Auto-proceed in headless mode
 
                     if key in [ord('n'), ord('N')]:
                         logging.info("Reset confirmed. Proceeding to next episode...")
@@ -584,8 +655,13 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
 
                         # Close camera display
                         camera_display.close()
-                        cv2.destroyAllWindows()
-                        cv2.waitKey(1)
+                        stop_keyboard_listener()
+                        if not is_headless():
+                            try:
+                                cv2.destroyAllWindows()
+                                cv2.waitKey(1)
+                            except:
+                                pass
 
                         # Stop daemon first
                         logging.info("Stopping DORA daemon...")
@@ -777,8 +853,13 @@ def record_loop(cfg: ControlPipelineConfig, daemon: Daemon):
                 # Close camera display window FIRST to release video resources
                 logging.info("Closing camera display...")
                 camera_display.close()
-                cv2.destroyAllWindows()
-                cv2.waitKey(1)  # Process any pending window events
+                stop_keyboard_listener()
+                if not is_headless():
+                    try:
+                        cv2.destroyAllWindows()
+                        cv2.waitKey(1)  # Process any pending window events
+                    except:
+                        pass
                 logging.info("Camera display closed")
 
                 # IMPORTANT: Stop the DORA daemon FIRST to disconnect hardware gracefully
@@ -995,12 +1076,13 @@ def cleanup_resources():
 
     logging.info("[Cleanup] Releasing resources...")
 
-    # Close OpenCV windows
-    try:
-        cv2.destroyAllWindows()
-        logging.info("[Cleanup] OpenCV windows closed")
-    except Exception as e:
-        logging.warning(f"[Cleanup] Error closing OpenCV: {e}")
+    # Close OpenCV windows (only if not in headless mode)
+    if not is_headless():
+        try:
+            cv2.destroyAllWindows()
+            logging.info("[Cleanup] OpenCV windows closed")
+        except Exception as e:
+            logging.warning(f"[Cleanup] Error closing OpenCV: {e}")
 
     # Stop daemon (disconnects robot, releases USB ports)
     if _daemon is not None:

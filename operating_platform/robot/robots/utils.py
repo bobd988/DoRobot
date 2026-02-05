@@ -24,7 +24,9 @@ from operating_platform.robot.robots.configs import (
     RealmanRobotConfig,
     SO101RobotConfig,
     PiperV1RobotConfig,
-    PiperUArmRobotConfig
+    PiperUArmRobotConfig,
+    VRX5RobotConfig,
+    LeaderX5RobotConfig
 )
 import platform
 import time
@@ -114,6 +116,8 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
         return PiperV1RobotConfig(**kwargs)
     elif robot_type == "piper_uarm":
         return PiperUArmRobotConfig(**kwargs)
+    elif robot_type == "vr_x5":
+        return VRX5RobotConfig(**kwargs)
     else:
         raise ValueError(f"Robot type '{robot_type}' is not available.")
 
@@ -145,7 +149,15 @@ def make_robot_from_config(config: RobotConfig):
         from operating_platform.robot.robots.piper_v1.manipulator import PiperV1Manipulator
         print("In PiperUArmRobotConfig")
         return PiperV1Manipulator(config)
-    
+    elif isinstance(config, VRX5RobotConfig):
+        from operating_platform.robot.robots.vr_x5.manipulator import VRX5Manipulator
+        print("In VRX5RobotConfig")
+        return VRX5Manipulator(config)
+    elif isinstance(config, LeaderX5RobotConfig):
+        from operating_platform.robot.robots.leader_x5.manipulator import LeaderX5Manipulator
+        print("In LeaderX5RobotConfig")
+        return LeaderX5Manipulator(config)
+
     # elif isinstance(config, AdoraDualRobotConfig):
     #     from lerobot.common.robot_devices.robots.adora_dual_manipulator import AdoraDualManipulator
     #     print("In AdoraDualRobotConfig")

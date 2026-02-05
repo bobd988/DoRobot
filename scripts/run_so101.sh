@@ -1,13 +1,15 @@
 #!/bin/bash
 #
-# Unified SO101 Robot Data Collection Launcher
+# Leader-Follower Robot Data Collection Launcher
+# (Modified from SO101 for Feetech Leader + ARX-X5 Follower)
 #
 # This script starts both DORA dataflow and CLI with proper ordering:
 # 1. Cleans up stale ZeroMQ socket files
-# 2. Starts DORA dataflow in background
-# 3. Waits for ZeroMQ sockets to be ready
-# 4. Starts CLI in foreground
-# 5. Handles cleanup on exit
+# 2. Sets up CAN interface for ARX-X5
+# 3. Starts DORA dataflow in background
+# 4. Waits for ZeroMQ sockets to be ready
+# 5. Starts CLI in foreground
+# 6. Handles cleanup on exit
 #
 # Usage:
 #   bash scripts/run_so101.sh [options]
@@ -17,7 +19,7 @@
 set -e
 
 # Version
-VERSION="0.2.99"
+VERSION="0.3.0-LeaderFollower"
 
 # Configuration - Single unified environment
 CONDA_ENV="${CONDA_ENV:-dorobot}"
@@ -75,7 +77,7 @@ ASCEND_TOOLKIT_PATH="${ASCEND_TOOLKIT_PATH:-/usr/local/Ascend/ascend-toolkit}"
 #   4 = Local raw (skip encoding, save raw images locally only)
 # Edge mode (2) is fastest for LAN transfer
 # Local raw (4) is useful for testing or later upload with edge_encode.py
-CLOUD="${CLOUD:-2}"
+CLOUD="${CLOUD:-0}"
 
 # Edge Server Configuration (only used when CLOUD=2)
 EDGE_SERVER_HOST="${EDGE_SERVER_HOST:-127.0.0.1}"
@@ -126,18 +128,22 @@ CAMERA_WRIST_PATH="${CAMERA_WRIST_PATH:-2}"
 CAMERA_WRIST2_PATH="${CAMERA_WRIST2_PATH:-4}"
 
 # Arm ports - use /dev/serial/by-path/... or /dev/serial/by-id/... for stability
+# Leader arm: Feetech STS3215 on serial port (QinHeng Electronics)
 ARM_LEADER_PORT="${ARM_LEADER_PORT:-/dev/ttyACM0}"
+# Follower arm: ARX-X5 on CAN bus
+ARM_FOLLOWER_CAN="${ARM_FOLLOWER_CAN:-can0}"
+# Legacy ports (not used in leader-follower mode)
 ARM_FOLLOWER_PORT="${ARM_FOLLOWER_PORT:-/dev/ttyACM1}"
-ARM_LEADER2_PORT="${ARM_LEADER2_PORT:-/dev/ttyACM2}"
+ARM_LEADER2_PORT="${ARM_LEADER2_PORT:-/dev/ttyACM0}"
 ARM_FOLLOWER2_PORT="${ARM_FOLLOWER2_PORT:-/dev/ttyACM3}"
 # ===========================================================================
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DORA_DIR="$PROJECT_ROOT/operating_platform/robot/robots/so101_v1"
-SOCKET_IMAGE="/tmp/dora-zeromq-so101-image"
-SOCKET_JOINT="/tmp/dora-zeromq-so101-joint"
+DORA_DIR="$PROJECT_ROOT/operating_platform/teleop_vr"
+SOCKET_IMAGE="/tmp/dora-zeromq-leader-follower-image"
+SOCKET_JOINT="/tmp/dora-zeromq-leader-follower-joint"
 SOCKET_TIMEOUT="${SOCKET_TIMEOUT:-30}"  # seconds to wait for sockets
 DORA_INIT_DELAY="${DORA_INIT_DELAY:-5}"  # seconds to wait after sockets ready for DORA to fully initialize
 DORA_PID=""
@@ -169,11 +175,11 @@ log_step() {
 
 # Initialize conda for this shell
 init_conda() {
-    # Find conda installation
-    if [ -n "$CONDA_EXE" ]; then
-        CONDA_BASE="$(dirname "$(dirname "$CONDA_EXE")")"
-    elif [ -d "$HOME/miniconda3" ]; then
+    # Find conda installation - prioritize miniconda3 for dorobot environment
+    if [ -d "$HOME/miniconda3" ]; then
         CONDA_BASE="$HOME/miniconda3"
+    elif [ -n "$CONDA_EXE" ]; then
+        CONDA_BASE="$(dirname "$(dirname "$CONDA_EXE")")"
     elif [ -d "$HOME/anaconda3" ]; then
         CONDA_BASE="$HOME/anaconda3"
     elif [ -d "/opt/conda" ]; then
@@ -182,6 +188,8 @@ init_conda() {
         log_error "Cannot find conda installation. Please ensure conda is installed."
         exit 1
     fi
+
+    log_info "Using conda from: $CONDA_BASE"
 
     # Source conda.sh to enable conda activate
     if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
@@ -196,8 +204,8 @@ init_conda() {
 activate_env() {
     local env_name="$1"
 
-    # Check if environment exists
-    if ! conda env list | grep -q "^${env_name} "; then
+    # Check if environment exists (check both name prefix and path)
+    if ! conda env list | grep -q -E "(^${env_name} |/${env_name}$)"; then
         log_error "Conda environment '$env_name' does not exist."
         log_error "Please run: bash scripts/setup_env.sh"
         exit 1
@@ -223,6 +231,40 @@ setup_npu_env() {
     fi
 }
 
+# Setup CAN interface for ARX-X5 follower arm
+setup_can_interface() {
+    log_step "Setting up CAN interface for ARX-X5..."
+
+    # Check if CAN is already configured
+    if ip link show "$ARM_FOLLOWER_CAN" &> /dev/null && ip link show "$ARM_FOLLOWER_CAN" | grep -q "UP"; then
+        log_info "CAN interface $ARM_FOLLOWER_CAN is already UP"
+        return 0
+    fi
+
+    # Try to setup CAN using the ARX setup script
+    local arx_setup_script="/home/dora/DoRobot-before/ARX_X5/setup_can.sh"
+    if [ -f "$arx_setup_script" ]; then
+        log_info "Running ARX CAN setup script..."
+        if sudo "$arx_setup_script" &> /dev/null; then
+            log_info "✓ CAN interface configured successfully"
+            return 0
+        else
+            log_warn "ARX setup script failed, trying manual setup..."
+        fi
+    fi
+
+    # Manual CAN setup as fallback
+    log_info "Attempting manual CAN setup..."
+    if sudo ip link set "$ARM_FOLLOWER_CAN" up type can bitrate 1000000 2>/dev/null; then
+        log_info "✓ CAN interface configured manually"
+        return 0
+    fi
+
+    log_error "Failed to setup CAN interface: $ARM_FOLLOWER_CAN"
+    log_error "Please run manually: sudo /home/dora/DoRobot-before/ARX_X5/setup_can.sh"
+    return 1
+}
+
 # Export device port environment variables for DORA dataflow
 export_device_ports() {
     log_step "Configuring device ports..."
@@ -240,19 +282,23 @@ export_device_ports() {
     # Export arm ports
     export ARM_LEADER_PORT
     export ARM_FOLLOWER_PORT
+    export ARM_FOLLOWER_CAN
     export ARM_LEADER2_PORT
     export ARM_FOLLOWER2_PORT
 
     # Export motor protocol (use feetech for leader arm)
     export MOTOR_PROTOCOL="${MOTOR_PROTOCOL:-feetech}"
 
+    # Export smoothing parameters for leader-follower adapter
+    export EMA_ALPHA="${EMA_ALPHA:-0.15}"  # 降低到0.15以增强平滑度（默认0.2）
+
     # Log configuration
     log_info "Camera configuration:"
     log_info "  camera_top:   $CAMERA_TOP_PATH"
     log_info "  camera_wrist: $CAMERA_WRIST_PATH"
     log_info "Arm configuration:"
-    log_info "  leader:   $ARM_LEADER_PORT"
-    log_info "  follower: $ARM_FOLLOWER_PORT"
+    log_info "  leader (Feetech):   $ARM_LEADER_PORT"
+    log_info "  follower (ARX-X5):  $ARM_FOLLOWER_CAN"
 
     # Warn if using default indices (may be unstable)
     if [[ "$CAMERA_TOP_PATH" =~ ^[0-9]+$ ]] || [[ "$CAMERA_WRIST_PATH" =~ ^[0-9]+$ ]]; then
@@ -286,14 +332,12 @@ set_device_permissions() {
         fi
     done
 
-    # Set arm serial port permissions
-    for arm_port in "$ARM_LEADER_PORT" "$ARM_FOLLOWER_PORT" "$ARM_LEADER2_PORT" "$ARM_FOLLOWER2_PORT"; do
-        if [ -e "$arm_port" ]; then
-            sudo chmod 777 "$arm_port" 2>/dev/null && \
-                log_info "Set permissions for: $arm_port" || \
-                log_warn "Could not set permissions for: $arm_port"
-        fi
-    done
+    # Set arm serial port permissions (only for leader arm, follower uses CAN)
+    if [ -e "$ARM_LEADER_PORT" ]; then
+        sudo chmod 777 "$ARM_LEADER_PORT" 2>/dev/null && \
+            log_info "Set permissions for leader arm: $ARM_LEADER_PORT" || \
+            log_warn "Could not set permissions for: $ARM_LEADER_PORT"
+    fi
 }
 
 # Check device permissions before starting - exit with error if not 777
@@ -302,40 +346,46 @@ check_device_permissions() {
 
     local permission_error=0
 
-    # Check serial port permissions (most critical)
-    for arm_port in "$ARM_LEADER_PORT" "$ARM_FOLLOWER_PORT"; do
-        if [ -e "$arm_port" ]; then
-            # Get permissions (e.g., "crw-rw-rw-" for 666, "crwxrwxrwx" for 777)
-            local perms=$(stat -c "%a" "$arm_port" 2>/dev/null || stat -f "%Lp" "$arm_port" 2>/dev/null)
-            if [ "$perms" != "777" ]; then
-                log_error "Permission denied: $arm_port (current: $perms, required: 777)"
-                permission_error=1
-            else
-                log_info "Permission OK: $arm_port (777)"
-            fi
+    # Check leader arm serial port permissions (most critical)
+    if [ -e "$ARM_LEADER_PORT" ]; then
+        # Get permissions (e.g., "crw-rw-rw-" for 666, "crwxrwxrwx" for 777)
+        local perms=$(stat -c "%a" "$ARM_LEADER_PORT" 2>/dev/null || stat -f "%Lp" "$ARM_LEADER_PORT" 2>/dev/null)
+        if [ "$perms" != "777" ]; then
+            log_error "Permission denied: $ARM_LEADER_PORT (current: $perms, required: 777)"
+            permission_error=1
         else
-            log_warn "Device not found: $arm_port"
+            log_info "Permission OK: $ARM_LEADER_PORT (777)"
         fi
-    done
+    else
+        log_error "Leader arm device not found: $ARM_LEADER_PORT"
+        permission_error=1
+    fi
+
+    # Check CAN interface
+    if ! ip link show "$ARM_FOLLOWER_CAN" &> /dev/null; then
+        log_error "CAN interface not found: $ARM_FOLLOWER_CAN"
+        permission_error=1
+    elif ! ip link show "$ARM_FOLLOWER_CAN" | grep -q "UP"; then
+        log_error "CAN interface is not UP: $ARM_FOLLOWER_CAN"
+        permission_error=1
+    else
+        log_info "CAN interface OK: $ARM_FOLLOWER_CAN (UP)"
+    fi
 
     if [ $permission_error -eq 1 ]; then
         echo ""
         log_error "=========================================="
-        log_error "  PERMISSION ERROR - Cannot continue"
+        log_error "  DEVICE ERROR - Cannot continue"
         log_error "=========================================="
         echo ""
-        log_error "Serial port permissions are not set correctly."
-        log_error "Please run the following command to fix permissions:"
+        log_error "Device permissions or CAN interface not configured correctly."
+        log_error "Please run the following commands:"
         echo ""
-        echo "    bash scripts/detect.sh"
+        echo "    # Fix leader arm permissions:"
+        echo "    sudo chmod 777 $ARM_LEADER_PORT"
         echo ""
-        log_error "Or manually run:"
-        echo "    sudo chmod 777 /dev/ttyACM0 /dev/ttyACM1"
-        echo "    sudo usermod -aG dialout \$USER"
-        echo ""
-        log_error "After running detect.sh, you may need to:"
-        log_error "  1. Unplug and replug the USB devices"
-        log_error "  2. Or log out and log back in"
+        echo "    # Setup CAN interface:"
+        echo "    sudo /home/dora/DoRobot-before/ARX_X5/setup_can.sh"
         echo ""
         exit 1
     fi
@@ -535,7 +585,7 @@ start_dora() {
     fi
 
     # Check if dataflow file exists
-    local dataflow_file="$DORA_DIR/dora_teleoperate_dataflow.yml"
+    local dataflow_file="$DORA_DIR/dora_leader_follower_x5.yml"
     if [ ! -f "$dataflow_file" ]; then
         log_error "Dataflow file not found: $dataflow_file"
         exit 1
@@ -544,8 +594,8 @@ start_dora() {
     # Start DORA in background
     cd "$DORA_DIR"
 
-    log_info "Running: dora run dora_teleoperate_dataflow.yml"
-    dora run dora_teleoperate_dataflow.yml &
+    log_info "Running: dora run dora_leader_follower_x5.yml"
+    dora run dora_leader_follower_x5.yml &
     DORA_PID=$!
 
     # Give DORA a moment to initialize
@@ -560,7 +610,7 @@ start_dora() {
     log_info "DORA started (PID: $DORA_PID)"
 
     # Try to get the graph name for cleaner shutdown
-    DORA_GRAPH_NAME=$(dora list 2>/dev/null | grep -oP 'dora_teleoperate_dataflow[^\s]*' | head -1) || true
+    DORA_GRAPH_NAME=$(dora list 2>/dev/null | grep -oP 'dora_leader_follower_x5[^\s]*' | head -1) || true
 
     cd "$PROJECT_ROOT"
 }
@@ -570,8 +620,8 @@ start_cli() {
     log_step "Starting CLI..."
 
     # Default parameters (can be overridden via command line)
-    local repo_id="${REPO_ID:-so101-test}"
-    local single_task="${SINGLE_TASK:-start and test so101 arm.}"
+    local repo_id="${REPO_ID:-leader-follower-x5}"
+    local single_task="${SINGLE_TASK:-Leader-follower teleoperation with Feetech and ARX-X5.}"
 
     log_info "Running main.py with parameters:"
     log_info "  repo_id: $repo_id"
@@ -601,7 +651,7 @@ start_cli() {
 
     # Build command arguments
     local cmd_args=(
-        --robot.type=so101
+        --robot.type=leader_x5
         --record.repo_id="$repo_id"
         --record.single_task="$single_task"
     )
@@ -631,14 +681,15 @@ start_cli() {
 print_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "SO101 Robot Data Collection - Unified Launcher"
+    echo "Leader-Follower Robot Data Collection Launcher"
+    echo "(Feetech Leader + ARX-X5 Follower)"
     echo ""
     echo "Environment Variables:"
     echo "  CONDA_ENV           Conda environment name (default: dorobot)"
-    echo "  REPO_ID             Dataset repository ID (default: so101-test)"
-    echo "  SINGLE_TASK         Task description (default: 'start and test so101 arm.')"
-    echo "  NPU             Ascend NPU support (default: 1, set to 0 to disable)"
-    echo "  CLOUD       Offload mode (default: 2):"
+    echo "  REPO_ID             Dataset repository ID (default: leader-follower-x5)"
+    echo "  SINGLE_TASK         Task description"
+    echo "  NPU                 Ascend NPU support (default: 1, set to 0 to disable)"
+    echo "  CLOUD               Offload mode (default: 2):"
     echo "                        0 = Local only (encode videos locally, no upload)"
     echo "                        1 = Cloud raw (upload raw images to cloud for encoding)"
     echo "                        2 = Edge mode (rsync to edge server, fastest for LAN)"
@@ -649,55 +700,22 @@ print_usage() {
     echo "  SOCKET_TIMEOUT      Seconds to wait for ZeroMQ sockets (default: 30)"
     echo ""
     echo "Edge Server Configuration (for CLOUD=2):"
-    echo "  EDGE_SERVER_HOST    Edge server IP address (default: 192.168.1.100)"
-    echo "  EDGE_SERVER_USER    SSH user on edge server (default: dorobot)"
+    echo "  EDGE_SERVER_HOST    Edge server IP address (default: 127.0.0.1)"
+    echo "  EDGE_SERVER_USER    SSH user on edge server (default: nupylot)"
     echo "  EDGE_SERVER_PASSWORD SSH password for edge server (uses paramiko if set)"
     echo "  EDGE_SERVER_PORT    SSH port (default: 22)"
     echo "  EDGE_SERVER_PATH    Upload directory on edge server (default: /uploaded_data)"
     echo ""
-    echo "Device Port Configuration (for stable operation):"
+    echo "Device Port Configuration:"
     echo "  CAMERA_TOP_PATH     Camera top path or index (default: 0)"
     echo "  CAMERA_WRIST_PATH   Camera wrist path or index (default: 2)"
-    echo "  ARM_LEADER_PORT     Leader arm serial port (default: /dev/ttyACM0)"
-    echo "  ARM_FOLLOWER_PORT   Follower arm serial port (default: /dev/ttyACM1)"
-    echo ""
-    echo "  For stable ports, use persistent paths:"
-    echo "    CAMERA_TOP_PATH=\"/dev/v4l/by-path/platform-xxx-video-index0\""
-    echo "    ARM_LEADER_PORT=\"/dev/serial/by-path/platform-xxx-port0\""
-    echo ""
-    echo "  Find your persistent paths with:"
-    echo "    python scripts/detect_usb_ports.py --yaml"
+    echo "  ARM_LEADER_PORT     Leader arm serial port (default: /dev/ttyACM1)"
+    echo "  ARM_FOLLOWER_CAN    Follower CAN interface (default: can0)"
     echo ""
     echo "Examples:"
-    echo "  $0                              # Default: local mode + NPU enabled"
+    echo "  $0                              # Default: edge mode + NPU enabled"
     echo "  REPO_ID=my-dataset $0           # Custom dataset name"
-    echo ""
-    echo "  # Edge mode (fastest - rsync to edge server on same LAN):"
-    echo "  CLOUD=2 $0"
-    echo ""
-    echo "  # Edge mode with custom server:"
-    echo "  CLOUD=2 EDGE_SERVER_HOST=192.168.1.200 $0"
-    echo ""
-    echo "  # Cloud raw mode (upload raw images directly to cloud):"
-    echo "  CLOUD=1 $0"
-    echo ""
-    echo "  # Cloud encoded mode (encode locally, upload encoded to cloud):"
-    echo "  CLOUD=3 $0"
-    echo ""
-    echo "  # Local only mode (encode videos locally, no upload):"
-    echo "  CLOUD=0 $0"
-    echo ""
-    echo "  # Local raw mode (skip encoding, save raw images for later upload):"
-    echo "  CLOUD=4 $0"
-    echo ""
-    echo "  # With persistent device paths (recommended for stability):"
-    echo "  CAMERA_TOP_PATH=\"/dev/v4l/by-path/...\" ARM_LEADER_PORT=\"/dev/serial/by-path/...\" $0"
-    echo ""
-    echo "  # Disable NPU (for non-Ascend hardware):"
-    echo "  NPU=0 $0"
-    echo ""
-    echo "  # With longer init delay (if timeout issues):"
-    echo "  DORA_INIT_DELAY=10 $0"
+    echo "  CLOUD=0 $0                      # Local only mode"
     echo ""
     echo "Note: This script starts both DORA dataflow and CLI automatically."
     echo "      Press 'n' to save episode and start new one."
@@ -714,7 +732,7 @@ main() {
 
     echo ""
     echo "=========================================="
-    echo "  SO101 Robot Data Collection Launcher"
+    echo "  Leader-Follower Data Collection"
     echo "  Version: $VERSION"
     echo "=========================================="
     echo ""
@@ -727,6 +745,9 @@ main() {
     # Step 0.5: Setup NPU environment if needed
     setup_npu_env
 
+    # Step 0.6: Setup CAN interface for ARX-X5
+    setup_can_interface
+
     # Step 0.6: Export device port configuration
     export_device_ports
 
@@ -736,13 +757,8 @@ main() {
     # Step 1: Clean up stale sockets
     cleanup_stale_sockets
 
-    # Step 1.5: Prepare follower arm - move to reference position
-    log_step "Preparing follower arm..."
-    python "$PROJECT_ROOT/scripts/prepare_follower.py"
-    if [ $? -ne 0 ]; then
-        log_error "Failed to prepare follower arm"
-        exit 1
-    fi
+    # Step 1.5: Prepare follower arm (ARX-X5 doesn't need preparation, controlled via CAN)
+    log_step "Follower arm ready (ARX-X5 on CAN)"
     echo ""
 
     # Step 2: Start DORA

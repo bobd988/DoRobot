@@ -1,0 +1,147 @@
+# VR遥操ARX-X5数据录制配置
+# 集成：VR输入 + IK求解 + ARX-X5 + 奥比中光相机 + 数据保存
+
+nodes:
+  # ========== 定时器 ==========
+  - id: tick
+    path: ./tick.py
+    outputs: [tick]
+    env:
+      TICK_HZ: "30"
+
+  # ========== Web UI界面 ==========
+  - id: telegrip_https_ui
+    path: ./telegrip_https_ui.py
+    inputs:
+      tick: tick/tick
+    env:
+      TELEGRIP_ROOT: .
+      TELEGRIP_UI_DIR: ./web-ui/web-ui
+      TELEGRIP_CERT: ./cert.pem
+      TELEGRIP_KEY: ./key.pem
+      TELEGRIP_UI_HOST: "0.0.0.0"
+      TELEGRIP_UI_PORT: "8443"
+
+  # ========== RealSense相机 - 顶部视角 ==========
+  - id: camera_top
+    path: ../robot/components/camera_rgbd_realsense/main.py
+    inputs:
+      tick: tick/tick
+    outputs:
+      - image
+    env:
+      CAMERA_SERIAL: "405622073811"  # RealSense D435I - 顶部相机
+      IMAGE_WIDTH: "640"
+      IMAGE_HEIGHT: "480"
+      FPS: "30"
+      CAMERA_NAME: "camera_top"
+
+  # ========== RealSense相机 - 腕部视角 ==========
+  - id: camera_wrist
+    path: ../robot/components/camera_rgbd_realsense/main.py
+    inputs:
+      tick: tick/tick
+    outputs:
+      - image
+    env:
+      CAMERA_SERIAL: "347622073355"  # RealSense D435I - 腕部相机
+      IMAGE_WIDTH: "640"
+      IMAGE_HEIGHT: "480"
+      FPS: "30"
+      CAMERA_NAME: "camera_wrist"
+
+  # ========== VR输入节点 ==========
+  - id: vr_ws_in
+    path: ./vr_ws_in.py
+    inputs:
+      tick: tick/tick
+    outputs:
+      - vr_event
+    env:
+      VR_WS_PORT: "8442"
+      VR_PRINT_FIRST_N: "3"
+      VR_FLUSH_LOG_EVERY_SEC: "2"
+      TELEGRIP_CERT: "./cert.pem"
+      TELEGRIP_KEY: "./key.pem"
+
+  # ========== VR命令转换节点 ==========
+  - id: command_mux
+    path: ./command_mux.py
+    inputs:
+      vr_event: vr_ws_in/vr_event
+    outputs:
+      - arm_cmd
+    env:
+      MUX_HEARTBEAT_SEC: "5.0"
+      MUX_GRIP_EPS: "0.05"
+
+  # ========== IK求解节点 ==========
+  - id: arm_to_jointcmd_ik
+    path: ./arm_to_jointcmd_ik.py
+    inputs:
+      arm_cmd: command_mux/arm_cmd
+      joint: arm_arx_x5/joint
+    outputs:
+      - action_joint
+    env:
+      URDF_PATH: "./x5_kinematics_only.urdf"
+      EE_LINK: "link6"
+      ARM_NAME: "ARX-X5"
+      IK_HOME_POS: "0.20,0.00,0.30"
+      IK_POS_MAP: "-x,-y,z"  # X轴反向：手柄前推→机械臂前移
+      IK_POS_SCALE: "1,1,1"  # 100%缩放，VR手柄移动距离直接映射到机械臂
+      # ========== 旋转控制开关 ==========
+      # 设置为 "1" 启用VR手柄旋转控制机械臂末端姿态
+      # 设置为 "0" 禁用旋转控制（只控制位置）
+      # 如果旋转控制效果不好，改为 "0" 即可禁用
+      IK_USE_ORIENTATION: "0"
+      IK_REQUIRE_JOINT_ON_ENABLE: "1"
+      JOINT_OFFSET_DEG: "0,0,0,-90,-90,0"
+      JOINT_SIGN: "-1,1,1,1,1,1"  # 基座反向
+
+  # ========== ARX-X5机械臂节点 ==========
+  - id: arm_arx_x5
+    path: ./robot_driver_arx_x5.py
+    inputs:
+      action_joint: arm_to_jointcmd_ik/action_joint
+    outputs:
+      - joint
+    env:
+      X5_SDK_PATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python"
+      LD_LIBRARY_PATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api/arx_x5_src:/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api:/opt/ros/noetic/lib:/opt/ros/humble/lib:/usr/local/lib"
+      PYTHONPATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api:/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api/arx_x5_python"
+      CAN_PORT: "can0"
+      ARM_TYPE: "0"
+      NUM_JOINTS: "6"
+      DT: "0.05"
+      GRIPPER_SCALE: "5.0"
+      LOG_EVERY_N: "50"
+
+  # ========== 数据保存节点 ==========
+  - id: data_recorder
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./data_recorder_v2.py
+    inputs:
+      image_top: camera_top/image
+      image_wrist: camera_wrist/image
+      joint: arm_arx_x5/joint
+      action_joint: arm_to_jointcmd_ik/action_joint
+    env:
+      REPO_ID: "vr-x5-dataset"
+      SINGLE_TASK: "VR遥操ARX-X5机械臂"
+      ROOT: "/home/dora/DoRobot/dataset"
+      FPS: "30"
+
+  # ========== ZeroMQ发送节点（用于main.py显示） ==========
+  - id: zeromq_sender
+    path: ./zeromq_sender.py
+    inputs:
+      image_top: camera_top/image
+      image_wrist: camera_wrist/image
+      joint: arm_arx_x5/joint
+      action_joint: arm_to_jointcmd_ik/action_joint
+      vr_event: vr_ws_in/vr_event
+    env:
+      SOCKET_IMAGE: "/tmp/dora-zeromq-vr-x5-image"
+      SOCKET_JOINT: "/tmp/dora-zeromq-vr-x5-joint"
+      SOCKET_VR: "/tmp/dora-zeromq-vr-x5-vr"

@@ -1,0 +1,135 @@
+# ===========================================================================
+# DORA Teleoperate Dataflow for Leader-Follower (Feetech -> ARX-X5)
+# With Data Recording Support
+# ===========================================================================
+#
+# 主臂（Leader）: Feetech STS3215 (7 joints) on /dev/ttyACM1
+# 从臂（Follower）: ARX X5 (6 joints + gripper) on can0
+# 相机: RealSense D435I
+#
+# ===========================================================================
+
+nodes:
+  # 相机节点 - RealSense (顶部视角)
+  - id: camera_top
+    path: /home/dora/DoRobot/operating_platform/robot/components/camera_rgbd_realsense/main.py
+    inputs:
+      tick: dora/timer/millis/33  # 30Hz
+    outputs:
+      - image
+    env:
+      DEVICE_SERIAL: "406122070147"  # RealSense D435I (top camera, /dev/video8)
+      IMAGE_WIDTH: "640"
+      IMAGE_HEIGHT: "480"
+      CAMERA_INDEX: "0"
+
+  # 相机节点 - RealSense (腕部视角)
+  - id: camera_wrist
+    path: /home/dora/DoRobot/operating_platform/robot/components/camera_rgbd_realsense/main.py
+    inputs:
+      tick: dora/timer/millis/33  # 30Hz
+    outputs:
+      - image
+    env:
+      DEVICE_SERIAL: "347622073355"  # RealSense D435I (wrist camera, /dev/video14)
+      IMAGE_WIDTH: "640"
+      IMAGE_HEIGHT: "480"
+      CAMERA_INDEX: "1"
+
+  # 相机节点 - RealSense (右侧视角)
+  - id: camera_right_realsense
+    path: /home/dora/DoRobot/operating_platform/robot/components/camera_rgbd_realsense/main.py
+    inputs:
+      tick: dora/timer/millis/33  # 30Hz
+    outputs:
+      - image
+    env:
+      DEVICE_SERIAL: "346522074669"  # RealSense D435I (right camera)
+      IMAGE_WIDTH: "640"
+      IMAGE_HEIGHT: "480"
+      CAMERA_INDEX: "2"
+
+  # 主臂节点 - 读取Feetech电机位置
+  - id: arm_leader
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u /home/dora/DoRobot/operating_platform/robot/components/arm_normal_so101_v1/main.py
+    inputs:
+      get_joint: dora/timer/millis/50  # 20Hz
+    outputs:
+      - joint
+    env:
+      GET_DEVICE_FROM: PORT
+      PORT: /dev/ttyACM0
+      ARM_NAME: LeaderX5
+      ARM_ROLE: leader
+      MOTOR_PROTOCOL: feetech
+      CALIBRATION_DIR: /home/dora/DoRobot/operating_platform/robot/components/arm_normal_so101_v1/.calibration/
+
+  # 适配器节点 - 将主臂弧度值转换为从臂度数值
+  - id: adapter
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u /home/dora/DoRobot-vr/operating_platform/teleop_vr/leader_follower_adapter.py
+    inputs:
+      leader_joint: arm_leader/joint
+    outputs:
+      - action_joint
+    env:
+      # 底座旋转偏移（度数）
+      # 90 = 顺时针旋转90度
+      # -90 = 逆时针旋转90度
+      # 0 = 不旋转
+      BASE_ROTATION_OFFSET: "90"
+
+      # 零位对齐配置
+      ENABLE_ZERO_ALIGN: "true"
+      ZERO_ALIGN_DELAY: "10"
+
+      # 滤波器选择: "ema", "kalman", 或 "lowpass"
+      FILTER_TYPE: "lowpass"
+
+      # EMA平滑系数（仅当FILTER_TYPE="ema"时使用）
+      # 0.0-1.0，越小越平滑但响应越慢
+      EMA_ALPHA: "0.25"
+
+  # 从臂节点 - 控制ARX X5
+  - id: arm_follower_x5
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u /home/dora/DoRobot-vr/operating_platform/teleop_vr/robot_driver_arx_x5.py
+    inputs:
+      action_joint: adapter/action_joint
+    outputs:
+      - joint
+    env:
+      # X5 SDK路径
+      X5_SDK_PATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python"
+
+      # 共享库路径
+      LD_LIBRARY_PATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api/arx_x5_src:/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api:/opt/ros/noetic/lib:/opt/ros/humble/lib:/usr/local/lib"
+
+      # Python模块路径
+      PYTHONPATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api:/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api/arx_x5_python"
+
+      # CAN配置
+      CAN_PORT: "can0"
+      ARM_TYPE: "0"  # 0=普通X5
+      NUM_JOINTS: "6"
+      DT: "0.05"
+
+      # 夹爪映射
+      GRIPPER_SCALE: "10.0"  # 主臂夹爪(0-100) -> X5夹爪(0-1000)
+
+      # 日志控制
+      LOG_EVERY_N: "50"
+
+  # ZeroMQ节点 - 发送数据给CLI进行录制
+  - id: leader_follower_zeromq
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u dora_zeromq.py
+    inputs:
+      image_top: camera_top/image
+      image_wrist: camera_wrist/image
+      image_right_realsense: camera_right_realsense/image
+      main_leader_joint: arm_leader/joint
+      main_follower_joint: arm_follower_x5/joint
+    outputs:
+      - action_joint

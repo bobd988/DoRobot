@@ -1,0 +1,28 @@
+# 简化的DORA配置 - 只用于噪声诊断
+# 只启动主臂和ZeroMQ节点，不启动相机和从臂
+
+nodes:
+  # 主臂节点 - 读取Feetech电机位置
+  - id: arm_leader
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u /home/dora/DoRobot/operating_platform/robot/components/arm_normal_so101_v1/main.py
+    inputs:
+      get_joint: dora/timer/millis/50  # 20Hz
+    outputs:
+      - joint
+    env:
+      GET_DEVICE_FROM: PORT
+      PORT: /dev/ttyACM0
+      ARM_NAME: LeaderX5
+      ARM_ROLE: leader
+      MOTOR_PROTOCOL: feetech
+      CALIBRATION_DIR: /home/dora/DoRobot/operating_platform/robot/components/arm_normal_so101_v1/.calibration/
+
+  # ZeroMQ节点 - 发送数据
+  - id: leader_zeromq
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u /home/dora/DoRobot-vr/operating_platform/teleop_vr/dora_zeromq.py
+    inputs:
+      main_leader_joint: arm_leader/joint
+    outputs:
+      - action_joint

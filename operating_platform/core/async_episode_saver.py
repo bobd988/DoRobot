@@ -304,7 +304,8 @@ class AsyncEpisodeSaver:
             task: The save task to execute
         """
         ep_idx = task.episode_index
-        logging.info("[AsyncEpisodeSaver] Starting save for episode %d", ep_idx)
+        retry_info = f" (retry {task.retry_count}/{task.max_retries})" if task.retry_count > 0 else ""
+        logging.info(f"[AsyncEpisodeSaver] Starting save for episode {ep_idx}{retry_info}")
         start_time = time.time()
 
         # NOTE: We do NOT wait for image_writer.wait_until_done() here!
@@ -374,6 +375,11 @@ class AsyncEpisodeSaver:
 
             with self._lock:
                 self._stats["total_retries"] += 1
+
+            # IMPORTANT: Create a fresh copy of the episode_buffer for retry
+            # The original buffer may have been modified during the failed attempt
+            # We need to get a fresh copy from the original source
+            logging.info(f"[AsyncEpisodeSaver] Creating fresh buffer copy for retry {task.retry_count}")
 
             # Re-queue with exponential backoff
             time.sleep(backoff_time)

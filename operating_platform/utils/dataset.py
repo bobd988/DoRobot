@@ -470,7 +470,18 @@ def build_dataset_frame(
         if key in DEFAULT_FEATURES or not key.startswith(prefix):
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:
-            frame[key] = np.array([values[name] for name in ft["names"]], dtype=np.float32)
+            # Build array from individual joint values
+            arr = np.array([values[name] for name in ft["names"]], dtype=np.float32)
+
+            # DEBUG: Check for invalid values
+            if np.any(np.abs(arr) > 1000):
+                import logging
+                logging.warning(f"[build_dataset_frame] Invalid values in {key}:")
+                logging.warning(f"  names: {ft['names']}")
+                logging.warning(f"  values: {[values.get(name, 'MISSING') for name in ft['names']]}")
+                logging.warning(f"  array: {arr}")
+
+            frame[key] = arr
         elif ft["dtype"] in ["image", "video"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
 
@@ -829,6 +840,18 @@ def validate_episode_buffer(episode_buffer: dict, total_episodes: int, features:
     # 2. Previous saves may have failed
     # We only check that episode_index is not negative
     episode_index = episode_buffer["episode_index"]
+
+    # Handle both scalar and array episode_index (array case happens on retry)
+    if isinstance(episode_index, np.ndarray):
+        # If it's an array, check all values are the same and non-negative
+        if len(episode_index) > 0:
+            episode_index_scalar = episode_index[0]
+            if not np.all(episode_index == episode_index_scalar):
+                raise ValueError(f"episode_index array has inconsistent values")
+            episode_index = episode_index_scalar
+        else:
+            raise ValueError("episode_index array is empty")
+
     if episode_index < 0:
         raise ValueError(f"episode_index must be non-negative, got {episode_index}")
     # Allow episode_index >= total_episodes for async save (pre-allocated indices)

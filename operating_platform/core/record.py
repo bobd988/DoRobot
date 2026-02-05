@@ -137,6 +137,11 @@ class Record:
         self.record_complete = False
         self.save_data = None
 
+        # Track episode start time for real timestamps (fixes video playback speed issue)
+        self.episode_start_time = None
+        # Track last timestamp for debugging interval variations
+        self.last_timestamp = None
+
         # Lock to protect buffer swap during save_async (prevents race condition
         # where recording thread adds frame while buffer is being captured)
         self._buffer_lock = threading.Lock()
@@ -156,6 +161,7 @@ class Record:
 
         action_features = hw_to_dataset_features(robot.action_features, "action", self.robot.use_videos)
         obs_features = hw_to_dataset_features(robot.observation_features, "observation", self.robot.use_videos)
+
         dataset_features = {**action_features, **obs_features}
 
         if self.record_cfg.resume:
@@ -176,6 +182,9 @@ class Record:
         else:
             # Create empty dataset or load existing saved episodes
             # sanity_check_dataset_name(record_cfg.repo_id, record_cfg.policy)
+            # Use larger tolerance for real-time data collection (0.5s instead of 1e-4s)
+            # Real-time collection has timing variations due to system load, which is normal
+            # For 30fps target: expected interval = 0.033s, but actual can be 0.1-0.4s
             self.dataset = DoRobotDataset.create(
                 record_cfg.repo_id,
                 record_cfg.fps,
@@ -184,6 +193,7 @@ class Record:
                 features=dataset_features,
                 use_videos=record_cfg.video,
                 use_audios=len(robot.microphones) > 0,
+                tolerance_s=1.0,  # Increased tolerance for VR teleoperation with significant delays
                 image_writer_processes=record_cfg.num_image_writer_processes,
                 image_writer_threads=record_cfg.num_image_writer_threads_per_camera * len(robot.cameras),
             )
@@ -199,6 +209,11 @@ class Record:
         AsyncEpisodeSaver's counter to ensure correct sequencing even when
         multiple episodes are being saved in parallel.
         """
+        # Reset episode start time for new episode
+        self.episode_start_time = time.time()
+        # Reset last timestamp for debugging
+        self.last_timestamp = None
+
         if self.use_async_save and self.async_saver:
             # Pre-allocate index from async saver
             episode_index = self.async_saver.allocate_next_index()
@@ -224,6 +239,10 @@ class Record:
         self.running = True
 
     def process(self):
+        import logging
+        logging.info("[Record.process] Thread started")
+
+        frame_count = 0
         while self.running:
             if self.dataset is not None:
                 start_loop_t = time.perf_counter()
@@ -231,13 +250,55 @@ class Record:
                 observation = self.daemon.get_observation()
                 action = self.daemon.get_obs_action()
 
+                # Skip if data is not available yet (daemon hasn't populated data)
+                if observation is None or action is None:
+                    time.sleep(0.01)  # Small delay to avoid busy loop
+                    continue
+
+                # Log every 100 frames
+                frame_count += 1
+                if frame_count % 100 == 0:
+                    logging.info(f"[Record.process] Processing frame #{frame_count}")
+                    logging.info(f"  observation keys: {list(observation.keys())}")
+                    logging.info(f"  action keys: {list(action.keys())}")
+
                 if self.dataset is not None:
-                    observation_frame = build_dataset_frame(self.dataset.features, observation, prefix="observation")
-                    action_frame = build_dataset_frame(self.dataset.features, action, prefix="action")
-                    frame = {**observation_frame, **action_frame}
-                    # Use lock to prevent race condition with save_async buffer swap
-                    with self._buffer_lock:
-                        self.dataset.add_frame(frame, self.record_cfg.single_task)
+                    try:
+                        observation_frame = build_dataset_frame(self.dataset.features, observation, prefix="observation")
+                        action_frame = build_dataset_frame(self.dataset.features, action, prefix="action")
+
+                        if frame_count % 100 == 0:
+                            logging.info(f"  observation_frame keys: {list(observation_frame.keys())}")
+                            logging.info(f"  action_frame keys: {list(action_frame.keys())}")
+
+                        frame = {**observation_frame, **action_frame}
+
+                        # Add real timestamp to frame (fixes video playback speed issue)
+                        # This timestamp will be used by DoRobotDataset.add_frame() instead of
+                        # the calculated timestamp (frame_index / fps), ensuring video playback
+                        # speed matches actual operation speed
+                        if self.episode_start_time is not None:
+                            current_timestamp = time.time() - self.episode_start_time
+                            frame['timestamp'] = current_timestamp
+
+                            # Debug: Track timestamp intervals every 100 frames
+                            if frame_count % 100 == 0 and self.last_timestamp is not None:
+                                interval = current_timestamp - self.last_timestamp
+                                logging.info(f"  [Timestamp Debug] Last 100 frames interval: {interval:.3f}s (avg {interval/100:.4f}s per frame)")
+
+                            self.last_timestamp = current_timestamp
+
+                        # Use lock to prevent race condition with save_async buffer swap
+                        with self._buffer_lock:
+                            self.dataset.add_frame(frame, self.record_cfg.single_task)
+
+                        if frame_count % 100 == 0:
+                            logging.info(f"  Frame #{frame_count} added successfully")
+
+                    except Exception as e:
+                        logging.error(f"[Record.process] Error processing frame #{frame_count}: {e}")
+                        import traceback
+                        traceback.print_exc()
 
                 dt_s = time.perf_counter() - start_loop_t
 

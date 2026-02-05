@@ -77,12 +77,13 @@ class Daemon:
         try:
             self.robot = make_robot_from_config(config)
         except Exception as e:
-            KeyboardInterrupt
-        print("Make robot succese")
+            logging.error(f"[Daemon] Failed to create robot: {e}")
+            raise
+        print("Make robot success")
 
         if not self.robot.is_connected:
             self.robot.connect()
-        print("Connect robot succese")
+        print("Connect robot success")
 
         # self.thread.start()
         # self.running = True
@@ -109,6 +110,17 @@ class Daemon:
 
         observation, action = self.robot.teleop_step(record_data=True)
 
+        # DEBUG: Log every 100 calls
+        if not hasattr(self, '_update_call_count'):
+            self._update_call_count = 0
+        self._update_call_count += 1
+
+        if self._update_call_count % 100 == 0:
+            import logging
+            logging.info(f"[Daemon.update] Call #{self._update_call_count}:")
+            logging.info(f"  observation from robot: {observation.keys() if observation else 'None'}")
+            logging.info(f"  action from robot: {action.keys() if action else 'None'}")
+
         # if observation is not None:
         #     self.observation = observation.copy()
 
@@ -123,7 +135,7 @@ class Daemon:
             # pre_action = self.pre_action.copy()
             action = self.robot.send_action(pre_action["action"])
             action = {"action": action}
-        
+
         dt_s = time.perf_counter() - start_loop_t
 
         if self.fps is not None:

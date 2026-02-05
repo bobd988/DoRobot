@@ -899,6 +899,10 @@ class DoRobotDataset(torch.utils.data.Dataset):
         temporary directory — nothing is written to disk. To save those frames, the 'save_episode()' method
         then needs to be called.
         """
+        # Extract timestamp before validation (if present)
+        # Timestamp is metadata, not a feature, so it shouldn't be validated
+        real_timestamp = frame.pop('timestamp', None)
+
         # Convert torch to numpy if needed
         for name in frame:
             if isinstance(frame[name], torch.Tensor):
@@ -912,10 +916,27 @@ class DoRobotDataset(torch.utils.data.Dataset):
         # Automatically add frame_index and timestamp to episode buffer
         frame_index = self.episode_buffer["size"]
 
-        # IMPORTANT: Always calculate timestamp from frame_index to ensure consistency.
-        # Do NOT use timestamp from frame dict as it could be stale or from wrong episode.
-        # This prevents timestamp sync errors during training.
-        timestamp = frame_index / self.fps
+        # 时间戳生成策略（修复视频播放速度问题）
+        #
+        # 原实现：timestamp = frame_index / self.fps
+        #   - 假设系统完美运行在目标fps（如30fps）
+        #   - 时间戳总是理想的等间隔（0.0333s）
+        #   - 但实际采集可能慢于30fps，导致视频播放速度快于实际操作速度
+        #
+        # 新实现：优先使用真实时间戳
+        #   - 如果frame中包含'timestamp'，使用真实的系统时间
+        #   - 否则使用frame_index / fps计算（向后兼容）
+        #   - 这样视频播放速度就会与实际操作速度一致
+        #
+        if real_timestamp is not None:
+            # 使用真实时间戳（由Record.process传入）
+            timestamp = real_timestamp
+        else:
+            # 向后兼容：使用计算的时间戳
+            # IMPORTANT: Always calculate timestamp from frame_index to ensure consistency.
+            # Do NOT use timestamp from frame dict as it could be stale or from wrong episode.
+            # This prevents timestamp sync errors during training.
+            timestamp = frame_index / self.fps
 
         # Validation: Ensure timestamps are monotonically increasing within episode
         if len(self.episode_buffer["timestamp"]) > 0:
@@ -973,32 +994,119 @@ class DoRobotDataset(torch.utils.data.Dataset):
         else:
             episode_buffer = self.episode_buffer
 
-        validate_episode_buffer(episode_buffer, self.meta.total_episodes, self.features)
+        # Debug: Log buffer state for retry diagnosis
+        has_index = "index" in episode_buffer
+        has_size = "size" in episode_buffer
+        has_task = "task" in episode_buffer
+        ep_idx_type = type(episode_buffer.get("episode_index")).__name__
+        logging.debug(
+            f"[save_episode] Buffer state: has_index={has_index}, has_size={has_size}, "
+            f"has_task={has_task}, episode_index_type={ep_idx_type}"
+        )
+
+        # Debug: Log buffer state at entry
+        logging.info(f"[save_episode] Entry - buffer keys: {list(episode_buffer.keys())[:10]}...")
+        logging.info(f"[save_episode] Has 'size': {'size' in episode_buffer}, Has 'task': {'task' in episode_buffer}, Has 'index': {'index' in episode_buffer}")
+        if "size" in episode_buffer:
+            logging.info(f"[save_episode] size value: {episode_buffer['size']} (type: {type(episode_buffer['size'])})")
+        if "episode_index" in episode_buffer:
+            ep_idx_val = episode_buffer["episode_index"]
+            logging.info(f"[save_episode] episode_index type: {type(ep_idx_val)}, shape: {ep_idx_val.shape if isinstance(ep_idx_val, np.ndarray) else 'N/A'}")
+        if "index" in episode_buffer:
+            idx_val = episode_buffer["index"]
+            logging.warning(f"[save_episode] 'index' key already exists! type: {type(idx_val)}, shape: {idx_val.shape if isinstance(idx_val, np.ndarray) else 'N/A'}, first few values: {idx_val[:3] if isinstance(idx_val, np.ndarray) else idx_val}")
+
+        # Check if this is a retry by looking for our special marker
+        # We'll add this marker after first processing
+        is_retry = "_save_attempt_done" in episode_buffer
+
+        logging.info(f"[save_episode] is_retry={is_retry} (marker exists: {is_retry})")
+
+        if not is_retry:
+            # Only validate on first attempt (when size/task keys exist)
+            if "size" in episode_buffer and "task" in episode_buffer:
+                validate_episode_buffer(episode_buffer, self.meta.total_episodes, self.features)
+            else:
+                logging.warning(f"[save_episode] First attempt but size/task missing! This shouldn't happen.")
 
         # size and task are special cases that won't be added to hf_dataset
-        episode_length = episode_buffer.pop("size")
-        tasks = episode_buffer.pop("task")
-        episode_tasks = list(set(tasks))
+        # Extract and immediately remove them to avoid issues with _save_episode_table
+        episode_length = episode_buffer.pop("size") if "size" in episode_buffer else None
+        tasks = episode_buffer.pop("task") if "task" in episode_buffer else None
+
+        logging.info(f"[save_episode] After pop - episode_length: {episode_length}, tasks: {tasks is not None}")
+
+        if episode_length is None:
+            # On retry, get from already-processed buffer
+            logging.info(f"[save_episode] episode_length is None, checking timestamp...")
+            if "timestamp" in episode_buffer:
+                ts = episode_buffer["timestamp"]
+                logging.info(f"[save_episode] timestamp exists, type: {type(ts)}, is ndarray: {isinstance(ts, np.ndarray)}")
+                if isinstance(ts, np.ndarray):
+                    episode_length = len(ts)
+                    logging.info(f"[save_episode] Retry detected, inferred episode_length={episode_length} from timestamp array")
+                elif isinstance(ts, list):
+                    episode_length = len(ts)
+                    logging.info(f"[save_episode] Retry detected, inferred episode_length={episode_length} from timestamp list")
+                else:
+                    logging.error(f"[save_episode] timestamp has unexpected type: {type(ts)}")
+                    raise ValueError(f"episode_length is None - 'size' key missing and timestamp has unexpected type {type(ts)}")
+            else:
+                logging.error(f"[save_episode] No timestamp key in buffer. Keys: {list(episode_buffer.keys())}")
+                raise ValueError("episode_length is None - 'size' key missing and cannot infer from buffer")
+
+        if tasks is None:
+            # On retry, we can't recover tasks, but we can continue if task_index exists
+            if "task_index" in episode_buffer:
+                logging.info(f"[save_episode] Retry detected, tasks unavailable but task_index exists")
+                episode_tasks = []  # Will be skipped in task processing
+            else:
+                raise ValueError("tasks is None - 'task' key missing and task_index not found")
+        else:
+            episode_tasks = list(set(tasks))
         episode_index = episode_buffer["episode_index"]
 
-        episode_buffer["index"] = np.arange(self.meta.total_frames, self.meta.total_frames + episode_length)
-        episode_buffer["episode_index"] = np.full((episode_length,), episode_index)
+        # Handle both scalar and array episode_index (array case happens on retry)
+        if isinstance(episode_index, np.ndarray):
+            episode_index = int(episode_index[0])
+
+        # Check if buffer has already been processed (happens on retry)
+        # If "index" key exists AND is an array, the buffer was already transformed
+        already_processed = "index" in episode_buffer and isinstance(episode_buffer.get("index"), np.ndarray)
+
+        # Mark that we've started processing (for retry detection)
+        if not is_retry:
+            episode_buffer["_save_attempt_done"] = True
+
+        if already_processed:
+            logging.info(f"[save_episode] Buffer already processed (index is ndarray), skipping transformations")
+        else:
+            if "index" in episode_buffer:
+                logging.warning(f"[save_episode] 'index' exists but is not ndarray (type: {type(episode_buffer['index'])}), will overwrite")
+            logging.debug(f"[save_episode] First attempt for episode {episode_index}, applying buffer transformations")
+
+        if not already_processed:
+            episode_buffer["index"] = np.arange(self.meta.total_frames, self.meta.total_frames + episode_length)
+            episode_buffer["episode_index"] = np.full((episode_length,), episode_index)
 
         # Add new tasks to the tasks dictionary
-        for task in episode_tasks:
-            task_index = self.meta.get_task_index(task)
-            if task_index is None:
-                self.meta.add_task(task)
+        # Only do this on first attempt, not on retry
+        if not already_processed and episode_tasks:  # Skip if episode_tasks is empty (retry case)
+            for task in episode_tasks:
+                task_index = self.meta.get_task_index(task)
+                if task_index is None:
+                    self.meta.add_task(task)
 
-        # Given tasks in natural language, find their corresponding task indices
-        episode_buffer["task_index"] = np.array([self.meta.get_task_index(task) for task in tasks])
+            # Given tasks in natural language, find their corresponding task indices
+            if tasks:  # Only if tasks is not None (first attempt)
+                episode_buffer["task_index"] = np.array([self.meta.get_task_index(task) for task in tasks])
 
-        for key, ft in self.features.items():
-            # index, episode_index, task_index are already processed above, and image and video
-            # are processed separately by storing image path and frame info as meta data
-            if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video", "audio"]:
-                continue
-            episode_buffer[key] = np.stack(episode_buffer[key])
+            for key, ft in self.features.items():
+                # index, episode_index, task_index are already processed above, and image and video
+                # are processed separately by storing image path and frame info as meta data
+                if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video", "audio"]:
+                    continue
+                episode_buffer[key] = np.stack(episode_buffer[key])
 
         # IMPORTANT: Only stop audio writer in synchronous mode (episode_data is None)
         # When called from async worker (episode_data provided), the recording thread
@@ -1011,11 +1119,45 @@ class DoRobotDataset(torch.utils.data.Dataset):
         # Wait for THIS episode's images only (not all images in the queue)
         # This is critical for async save to work in parallel during recording
         self._wait_episode_images(episode_index, episode_length)
-        self._save_episode_table(episode_buffer, episode_index)
+
+        # Debug: Log buffer keys before saving
+        logging.debug(f"[save_episode] Buffer keys before _save_episode_table: {list(episode_buffer.keys())}")
+
+        # Debug: Check types of all values in buffer
+        for key in list(episode_buffer.keys())[:15]:  # Check first 15 keys
+            val = episode_buffer[key]
+            val_type = type(val).__name__
+            if isinstance(val, (list, np.ndarray)):
+                logging.debug(f"[save_episode]   {key}: {val_type}, len={len(val)}")
+            else:
+                logging.debug(f"[save_episode]   {key}: {val_type}, value={val}")
+
+        # Check if parquet file already exists (from previous attempt)
+        episode_parquet = self.root / self.meta.get_data_file_path(ep_index=episode_index)
+        if episode_parquet.exists():
+            logging.info(f"[save_episode] Parquet file already exists for episode {episode_index}, skipping _save_episode_table")
+        else:
+            self._save_episode_table(episode_buffer, episode_index)
+
+        # Remove internal marker keys before computing stats
+        if "_save_attempt_done" in episode_buffer:
+            del episode_buffer["_save_attempt_done"]
+
         ep_stats = compute_episode_stats(episode_buffer, self.features)
 
+        # Calculate actual fps from timestamps for video encoding
+        # This ensures video playback speed matches actual operation speed
+        actual_fps = self.fps  # Default to target fps
+        if len(episode_buffer["timestamp"]) > 1:
+            timestamps = episode_buffer["timestamp"]
+            total_duration = timestamps[-1] - timestamps[0]
+            num_intervals = len(timestamps) - 1
+            if total_duration > 0:
+                actual_fps = num_intervals / total_duration
+                logging.info(f"[VideoEncoder] Calculated actual fps: {actual_fps:.2f} (target: {self.fps})")
+
         if len(self.meta.video_keys) > 0 and not skip_encoding:
-            video_paths = self.encode_episode_videos(episode_index)
+            video_paths = self.encode_episode_videos(episode_index, actual_fps=actual_fps)
             for key in self.meta.video_keys:
                 episode_buffer[key] = video_paths[key]
         elif skip_encoding and len(self.meta.video_keys) > 0:
@@ -1027,6 +1169,18 @@ class DoRobotDataset(torch.utils.data.Dataset):
 
         ep_data_index = get_episode_data_index(self.meta.episodes, [episode_index])
         ep_data_index_np = {k: t.numpy() for k, t in ep_data_index.items()}
+
+        # Debug: Log timestamp statistics before validation
+        timestamps = episode_buffer["timestamp"]
+        if len(timestamps) > 1:
+            diffs = np.diff(timestamps)
+            logging.info(f"[Timestamp Debug] Episode {episode_index} timestamp statistics:")
+            logging.info(f"  Total frames: {len(timestamps)}")
+            logging.info(f"  Duration: {timestamps[-1] - timestamps[0]:.3f}s")
+            logging.info(f"  Interval stats: min={diffs.min():.4f}s, max={diffs.max():.4f}s, mean={diffs.mean():.4f}s, std={diffs.std():.4f}s")
+            logging.info(f"  Expected interval (1/fps): {1.0/self.fps:.4f}s")
+            logging.info(f"  Tolerance: ±{self.tolerance_s:.4f}s")
+
         check_timestamps_sync(
             episode_buffer["timestamp"],
             episode_buffer["episode_index"],
@@ -1278,19 +1432,27 @@ class DoRobotDataset(torch.utils.data.Dataset):
         for ep_idx in range(self.meta.total_episodes):
             self.encode_episode_videos(ep_idx)
 
-    def encode_episode_videos(self, episode_index: int) -> dict:
+    def encode_episode_videos(self, episode_index: int, actual_fps: float | None = None) -> dict:
         """
         Use ffmpeg to convert frames stored as png into mp4 videos.
         Note: `encode_video_frames` is a blocking call. Making it asynchronous shouldn't speedup encoding,
         since video encoding with ffmpeg is already using multithreading.
+
+        Args:
+            episode_index: The episode index to encode
+            actual_fps: The actual frame rate calculated from timestamps. If None, uses self.fps.
+                       Using actual_fps ensures video playback speed matches actual operation speed.
         """
         import time
+
+        # Use actual fps if provided, otherwise fall back to target fps
+        encoding_fps = actual_fps if actual_fps is not None else self.fps
 
         video_paths = {}
         num_videos = len(self.meta.video_keys)
 
         if num_videos > 0:
-            logging.info(f"[VideoEncoder] Encoding {num_videos} videos for episode {episode_index}...")
+            logging.info(f"[VideoEncoder] Encoding {num_videos} videos for episode {episode_index} at {encoding_fps:.2f}fps...")
             start_time = time.time()
 
         for key in self.meta.video_keys:
@@ -1303,7 +1465,8 @@ class DoRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            # Use actual fps for encoding to match real operation speed
+            encode_video_frames(img_dir, video_path, int(round(encoding_fps)), overwrite=True)
 
         if num_videos > 0:
             elapsed = time.time() - start_time
@@ -1387,6 +1550,9 @@ class DoRobotDataset(torch.utils.data.Dataset):
         obj.tolerance_s = tolerance_s
         obj.image_writer = None
         obj.audio_writer = None
+
+        # Log tolerance setting for debugging
+        logging.info(f"[DoRobotDataset] Created dataset with tolerance_s={tolerance_s:.4f}s (expected interval: {1.0/fps:.4f}s for {fps}fps)")
 
         if image_writer_processes or image_writer_threads:
             obj.start_image_writer(image_writer_processes, image_writer_threads)

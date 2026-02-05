@@ -21,6 +21,29 @@ def is_headless() -> bool:
         return True
 
 
+# Global flag to track if OpenCV GUI is available
+_opencv_gui_available = None
+
+
+def check_opencv_gui() -> bool:
+    """Check if OpenCV GUI functions are available."""
+    global _opencv_gui_available
+
+    if _opencv_gui_available is not None:
+        return _opencv_gui_available
+
+    try:
+        # Try to call waitKey with a very short timeout
+        cv2.waitKey(1)
+        _opencv_gui_available = True
+    except cv2.error:
+        _opencv_gui_available = False
+    except Exception:
+        _opencv_gui_available = False
+
+    return _opencv_gui_available
+
+
 class CameraDisplay:
     """
     Unified camera display utility for multi-camera visualization.
@@ -270,13 +293,17 @@ class CameraDisplay:
             return -1
 
         if not images:
-            return cv2.waitKey(10)
+            return -1 if not check_opencv_gui() else cv2.waitKey(10)
 
         # Filter to only image keys
         image_dict = {k: v for k, v in images.items() if "image" in k.lower()}
 
         if not image_dict:
-            return cv2.waitKey(10)
+            return -1 if not check_opencv_gui() else cv2.waitKey(10)
+
+        # If OpenCV GUI is not available, return immediately
+        if not check_opencv_gui():
+            return -1
 
         # Setup window on first call
         self._setup_window()
@@ -294,14 +321,22 @@ class CameraDisplay:
             self._last_size = (w, h)
 
         # Display
-        cv2.imshow(self.window_name, combined)
-
-        return cv2.waitKey(10)
+        try:
+            cv2.imshow(self.window_name, combined)
+            return cv2.waitKey(10)
+        except cv2.error:
+            # If OpenCV GUI fails, mark it as unavailable and return
+            global _opencv_gui_available
+            _opencv_gui_available = False
+            return -1
 
     def close(self) -> None:
         """Close the display window."""
-        if self._window_created:
-            cv2.destroyWindow(self.window_name)
+        if self._window_created and check_opencv_gui():
+            try:
+                cv2.destroyWindow(self.window_name)
+            except cv2.error:
+                pass  # Ignore errors if GUI is not available
             self._window_created = False
 
 

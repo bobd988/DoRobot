@@ -47,7 +47,17 @@ class WsServer:
                 raw = msg.encode("utf-8") if isinstance(msg, str) else bytes(msg)
 
                 if self.printed < PRINT_FIRST_N:
-                    print(f"[vr_ws_in] sample head={raw[:240]!r} len={len(raw)}", flush=True)
+                    # Try to parse and show grip status
+                    try:
+                        import json
+                        data = json.loads(raw.decode('utf-8'))
+                        lc = data.get('leftController', {})
+                        grip = lc.get('gripActive', 'N/A')
+                        trigger = lc.get('trigger', 'N/A')
+                        print(f"[vr_ws_in] sample #{self.printed+1}: gripActive={grip}, trigger={trigger}, len={len(raw)}", flush=True)
+                        print(f"[vr_ws_in] sample head={raw[:240]!r}", flush=True)
+                    except:
+                        print(f"[vr_ws_in] sample head={raw[:240]!r} len={len(raw)}", flush=True)
                     self.printed += 1
 
                 try:

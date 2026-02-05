@@ -1,0 +1,132 @@
+nodes:
+  - id: tick
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./tick.py
+    outputs: [tick]
+    env:
+      TICK_HZ: "50"
+
+  - id: telegrip_https_ui
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./telegrip_https_ui.py
+    inputs:
+      tick: tick/tick
+    env:
+      TELEGRIP_ROOT: .
+      TELEGRIP_UI_DIR: ./web-ui
+      TELEGRIP_CERT: ./cert.pem
+      TELEGRIP_KEY: ./key.pem
+      TELEGRIP_UI_HOST: "0.0.0.0"
+      TELEGRIP_UI_PORT: "8443"
+
+  - id: vr_ws_in
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./vr_ws_in.py
+    inputs:
+      tick: tick/tick
+    outputs:
+      - vr_event
+    env:
+      VR_WS_PORT: "8442"
+      VR_PRINT_FIRST_N: "3"
+      VR_FLUSH_LOG_EVERY_SEC: "2"
+      TELEGRIP_CERT: "./cert.pem"
+      TELEGRIP_KEY: "./key.pem"
+
+  - id: command_mux
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./command_mux.py
+    inputs:
+      vr_event: vr_ws_in/vr_event
+    outputs: [arm_cmd]
+    env:
+      MUX_HEARTBEAT_SEC: "5.0"
+      MUX_GRIP_EPS: "0.05"
+
+  - id: arm_to_jointcmd_ik
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./arm_to_jointcmd_ik.py
+    inputs:
+      arm_cmd: command_mux/arm_cmd
+      joint: arm_arx_x5/joint  # 接收X5反馈
+    outputs: [action_joint]
+    env:
+      # X5 URDF配置
+      URDF_PATH: "/home/dora/DoRobot/operating_platform/teleop_vr/x5_kinematics_only.urdf"
+      EE_LINK: "link6"  # X5末端链接
+      ARM_NAME: "ARX-X5"
+
+      # 校准文件（可选，如果没有则不使用）
+      # CALIB_PATH: "/home/dora/DoRobot/operating_platform/teleop_vr/.calibration/ARX-X5.json"
+
+      # IK参数
+      IK_HOME_POS: "0.20,0.00,0.30"  # X5的初始位置（推荐：较高的安全位置）
+      IK_POS_MAP: "-x,-y,z"  # VR坐标系到机器人坐标系的映射（直接映射，方向完全一致）
+      IK_POS_SCALE: "1,1,1"  # 位置缩放因子（初始为1，根据需要调整）
+      IK_REQUIRE_JOINT_ON_ENABLE: "1"  # 需要关节反馈才能启用
+
+      # 位置偏移（用于微调）
+      IK_POS_OFFSET_X: "0.0"
+      IK_POS_OFFSET_Y: "0.0"
+      IK_POS_OFFSET_Z: "0.0"
+
+      # 关节微调（6个关节的偏置，单位：度）
+      # 格式：joint1,joint2,joint3,joint4,joint5,joint6
+      JOINT_OFFSET_DEG: "0,0,0,-90,-90,-90"  # 关节4和5减去90度偏置
+      JOINT_SIGN: "-1,1,1,1,1,1"  # 基座反向
+
+  # X5机械臂驱动节点
+  - id: arm_arx_x5
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./robot_driver_arx_x5.py
+    inputs:
+      action_joint: arm_to_jointcmd_ik/action_joint
+    outputs: [joint]
+    env:
+      # X5 SDK路径
+      X5_SDK_PATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python"
+
+      # 共享库路径（必需）
+      LD_LIBRARY_PATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api/arx_x5_src:/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api:/opt/ros/noetic/lib:/opt/ros/humble/lib:/usr/local/lib"
+
+      # Python模块路径（必需）
+      PYTHONPATH: "/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api:/home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/api/arx_x5_python"
+
+      # CAN配置
+      CAN_PORT: "can0"
+      ARM_TYPE: "0"  # 0=普通X5, 1=X5 Master, 2=X5 2025
+      NUM_JOINTS: "6"
+      DT: "0.05"
+
+      # 夹爪映射
+      GRIPPER_SCALE: "5.0"  # VR扳机(0-1) -> X5夹爪(0-5.0) 使用标准夹爪全部行程
+
+      # 日志控制
+      LOG_EVERY_N: "50"  # 每50次命令打印一次日志
+
+  # VR监控节点（推荐启用）
+  - id: vr_monitor
+    path: /home/dora/miniconda3/envs/dorobot/bin/python3
+    args: -u ./vr_monitor.py
+    inputs:
+      tick: tick/tick
+      vr_event: vr_ws_in/vr_event
+      arm_cmd: command_mux/arm_cmd
+      action_joint: arm_to_jointcmd_ik/action_joint
+      joint: arm_arx_x5/joint
+    env:
+      MONITOR_PRINT_INTERVAL: "5.0"  # 状态摘要打印间隔（秒）
+      MONITOR_POS_THRESHOLD: "0.01"  # 位置变化阈值（米）
+      MONITOR_GRIPPER_THRESHOLD: "0.05"  # 夹爪变化阈值
+
+  # 仿真可视化（可选，用于调试）
+  # - id: sim_viz
+  #   path: /home/dora/miniconda3/envs/dorobot/bin/python3
+  #   args: -u ./sim_viz.py
+  #   inputs:
+  #     tick: tick/tick
+  #     action_joint: arm_to_jointcmd_ik/action_joint
+  #   env:
+  #     SIM_URDF: /home/dora/DoRobot-before/ARX_X5/py/arx_x5_python/bimanual/script/x5.urdf
+  #     SIM_PAN_SIGN: "-1"
+  #     SIM_TICK_HZ: "50"
